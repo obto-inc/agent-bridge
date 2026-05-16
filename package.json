@@ -1,0 +1,37 @@
+{
+  "name": "@obtoai/agent-bridge",
+  "version": "0.1.0-beta.1",
+  "description": "Local consumer for the OBTO Agent Bridge. Receives bridge events over SSE and drives a coding agent (Claude Code or OpenAI Codex) on your machine.",
+  "license": "Apache-2.0",
+  "author": "OBTO Inc.",
+  "homepage": "https://github.com/obto-inc/agent-bridge",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/obto-inc/agent-bridge.git"
+  },
+  "bugs": "https://github.com/obto-inc/agent-bridge/issues",
+  "main": "src/daemon.js",
+  "bin": {
+    "obto-bridge": "bin/obto-bridge.js"
+  },
+  "scripts": {
+    "start": "node bin/obto-bridge.js start"
+  },
+  "files": [
+    "bin",
+    "src",
+    "cli",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.126",
+    "@openai/codex-sdk": "^0.130.0"
+  }
+}
