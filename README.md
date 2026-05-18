@@ -2,7 +2,7 @@
 
 A local daemon that lets a coding agent — [Claude Code](https://claude.ai/code) or [OpenAI Codex](https://developers.openai.com/codex) — running on your machine be driven from the [OBTO Agent Bridge](https://obto.co) web UI, even when you're away from the keyboard.
 
-You post a message on a thread from your phone or laptop. The daemon (running on your Mac, no port forwarding required) receives it over a long-lived HTTPS stream, spawns or resumes an agent session in your project directory, and the response posts back to the bridge thread within seconds.
+You post a message on a thread from your phone or laptop. The daemon (running on your machine, no port forwarding required) receives it over a long-lived HTTPS stream, spawns or resumes an agent session in your project directory, and the response posts back to the bridge thread within seconds.
 
 ## Status
 
@@ -10,7 +10,7 @@ You post a message on a thread from your phone or laptop. The daemon (running on
 
 ## What you'll need
 
-- macOS or Linux, **Node.js 18.17+** (Windows support is in testing)
+- macOS, Linux, or Windows, **Node.js 18.17+**
 - One coding agent installed, with your own auth:
   - **Claude** — Claude Code / the Claude Agent SDK, billed to your Anthropic account; or
   - **Codex** — the `codex` CLI (`npm i -g @openai/codex`), signed in to your OpenAI/ChatGPT account
@@ -65,7 +65,7 @@ Now open the bridge UI in any browser, log in with the browser credentials from 
 - Reply on an existing thread — daemon resumes the session bound to that thread
 - Start a new thread via the **+ New thread** button — daemon spawns a fresh session in your project directory
 
-Within ~5–10 seconds you should see Claude's reply appear back on the thread.
+Within ~5–10 seconds you should see the agent's reply appear back on the thread.
 
 ## Other commands
 
@@ -78,8 +78,8 @@ Within ~5–10 seconds you should see Claude's reply appear back on the thread.
 ## How it actually works
 
 ```
-Your phone        OBTO server                      Your Mac
-─────────         ───────────                      ────────
+Your phone        OBTO server                      Your machine
+─────────         ───────────                      ────────────
 [reply form] ──►  /api/reply ─► Mongo (durable)
                   └─►  RabbitMQ (publish bridge.<acct>.reply.<thread>)
                                                 ◄── /api/bridge/stream  (SSE, Bearer auth)
@@ -103,11 +103,15 @@ Key bits:
 
 The daemon runs your chosen agent on your machine with **your** credentials — Anthropic for `claude` (whatever Claude Code uses: `ANTHROPIC_API_KEY` or your Claude.ai session), or your OpenAI/ChatGPT account for `codex`. Every bridge-driven turn is a normal API call billed to you. We don't proxy.
 
-## Privacy and what we store
+## Data handling
 
-- Every message you and the agent post on a thread is stored in OBTO's Mongo. Bridge threads are strictly scoped to your account; we cannot see other tenants' threads.
-- Your daemon's `apiToken` is stored locally only; on the server we store a SHA-256 hash.
-- Right of erasure: email `support@obto.co` to delete your account and all associated messages.
+**Your model traffic never touches us.** The daemon runs on your machine and calls Anthropic or OpenAI with *your own* credentials. Your prompts, your code, and the model's responses pass directly between your machine and the model provider, under your own API account and its terms. OBTO does not proxy, route, or see that traffic.
+
+**What the bridge stores.** For threads to work, the messages you and the agent post are saved in OBTO's database — that's what makes a thread durable and readable from your phone. Threads are strictly scoped to your account; one tenant can never see another's. Your daemon's API token is stored server-side only as a SHA-256 hash; the plaintext token never leaves your local config file.
+
+**What we don't do with it.** OBTO does not use your bridge messages to train models, and does not sell or share your data with third parties.
+
+**Deletion.** Email `support@obto.co` to delete your account and every message associated with it.
 
 ## License
 
