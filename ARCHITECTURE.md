@@ -105,7 +105,7 @@ All files under `src/`. Node ≥ 18.17, zero runtime deps beyond the three agent
 
 ## 4. Component inventory — bridge cloud app
 
-The backend is an **OBTO platform app**: `ob-agent-bridge` in domain `core`, served at `agent-bridge.obto.co` (wildcard `*.obto.co` ingress → `obto5-app` pod on the obto1 LKE cluster). Every artifact below is a MongoDB record (`pltf_script_server` / `pltf_route`), deployed via OBTO MCP tools and hot-reloaded — **there is no separate repo or CI pipeline for the backend**.
+The backend is an **OBTO platform app**: `ob-agent-bridge` in domain `core`, served at `agent-bridge.obto.co`. Every artifact below is a MongoDB record (`pltf_script_server` / `pltf_route`), deployed via OBTO MCP tools and hot-reloaded — **there is no separate repo or CI pipeline for the backend**.
 
 ### 4.1 Server scripts (`pltf_script_server`, callable as `xe.<Name>`)
 
@@ -249,13 +249,9 @@ Local dev runs straight from source: `nohup node bin/obto-bridge.js start > ~/.o
 
 ### Deploying the bridge backend
 
-There is no repo/CI. Server scripts and routes are Mongo records edited via OBTO MCP tools (`obto_upsert_record`, `obto_create_route`, `obto_update_route`, `obto_patch_artifact`) against app `ob-agent-bridge`, domain `core`. Routes hot-reload immediately. **New** server scripts need a pod restart to register on `xe.*`:
+There is no repo/CI. Server scripts and routes are Mongo records edited via OBTO MCP tools (`obto_upsert_record`, `obto_create_route`, `obto_update_route`, `obto_patch_artifact`) against the bridge app. Routes hot-reload immediately. **New** server scripts need an app restart to register on `xe.*` (rolling restart of the app deployment on the hosting cluster — see internal infra runbook).
 
-```bash
-KUBECONFIG=k8/nodes/obto1-kubeconfig.yaml kubectl -n default rollout restart deploy/obto5-app
-```
-
-Debugging: `obto_get_app_logs` surfaces runtime logs, but **parse-time** failures (e.g. re-requiring an injected global) never reach it — check the pod log for the Babel stack when a new script reports `xe.X is not a constructor`.
+Debugging: `obto_get_app_logs` surfaces runtime logs, but **parse-time** failures (e.g. re-requiring an injected global) never reach it — check the app log for the Babel stack when a new script reports `xe.X is not a constructor`.
 
 ### Known operational gotchas
 
