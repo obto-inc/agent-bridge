@@ -1,7 +1,7 @@
 'use strict';
 
-// `obto-bridge status` — read local state.json and print thread→session bindings.
-// Read-only; useful for "did the daemon ever drive this thread?"
+// `obto-bridge status` — read local state.json and print thread→session
+// bindings. Read-only. v1.1: a thread keeps one session per agent.
 
 const fs = require('fs');
 const path = require('path');
@@ -29,20 +29,33 @@ if (threads.length === 0) {
 const fmtAge = (iso) => {
   if (!iso) return '?';
   const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
-  if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
-  if (ms < 86_400_000) return Math.floor(ms / 3_600_000) + 'h ago';
-  return Math.floor(ms / 86_400_000) + 'd ago';
+  if (ms < 60000) return Math.floor(ms / 1000) + 's ago';
+  if (ms < 3600000) return Math.floor(ms / 60000) + 'm ago';
+  if (ms < 86400000) return Math.floor(ms / 3600000) + 'h ago';
+  return Math.floor(ms / 86400000) + 'd ago';
 };
 
-console.log('Thread                               Session ID                            Last drive');
-console.log('-'.repeat(95));
+console.log('Thread                               Agent   Session ID                            Last drive');
+console.log('-'.repeat(100));
 threads.forEach((t) => {
-  const b = bindings[t];
-  const sid = (b.sessionId || '').slice(0, 36);
-  console.log(t.padEnd(36) + ' ' + sid.padEnd(38) + ' ' + fmtAge(b.lastDriveAt));
+  const b = bindings[t] || {};
+  // v1.1 per-agent sessions; tolerate a stray un-migrated v1 flat binding.
+  const sessions = b.sessions && typeof b.sessions === 'object'
+    ? b.sessions
+    : (b.sessionId ? { claude: b } : {});
+  const agents = Object.keys(sessions);
+  if (agents.length === 0) {
+    console.log(t.padEnd(36) + ' (no session yet)');
+    return;
+  }
+  agents.forEach((agent, i) => {
+    const s = sessions[agent] || {};
+    const sid = String(s.sessionId || '').slice(0, 36);
+    console.log(
+      (i === 0 ? t : '').padEnd(36) + ' ' +
+      agent.padEnd(7) + ' ' +
+      sid.padEnd(38) + ' ' +
+      fmtAge(s.lastDriveAt),
+    );
+  });
 });
-console.log('');
-console.log('JSONLs at: ' + (bindings[threads[0]] && bindings[threads[0]].projectDir
-  ? '~/.claude/projects/' + bindings[threads[0]].projectDir.replace(/\//g, '-') + '/'
-  : 'unknown'));

@@ -7,6 +7,10 @@ const os = require('os');
 const { encodeProjectDir } = require('./session-scanner');
 const bridgeHttp = require('./bridge-http');
 const { buildBridgeMcpServer } = require('./bridge-mcp-server');
+// Phase 5a — when this engine first touches a thread that already has bridge
+// history (provider switch / adopted thread), inject that history into the
+// first prompt so the session starts with context instead of amnesia.
+const { buildHistoryBlock } = require('./history');
 
 // Per-thread promise queue. Concurrent AMQP messages targeting the same thread
 // are serialized so first-touch session creation completes before any resume,
@@ -228,6 +232,52 @@ const buildEnvelope = (payload) => {
   return head + '\n\n' + body;
 };
 
+// Phase 6.4 — image attachments. When payload.attachmentIds is non-empty,
+// download each via the bridge HTTP API and assemble a multimodal user
+// message (image blocks + text envelope) as an async iterable, which the
+// Claude Agent SDK accepts in lieu of a plain prompt string. With no
+// attachments, returns the envelope text as-is — zero overhead on the
+// hot text-only path.
+const buildPromptForSdk = async (payload, envelopeText, log) => {
+  const ids = Array.isArray(payload && payload.attachmentIds)
+    ? payload.attachmentIds.filter(Boolean)
+    : [];
+  if (ids.length === 0) return envelopeText;
+
+  const blocks = [];
+  for (const id of ids) {
+    try {
+      const r = await bridgeHttp.getAttachmentBytes(id);
+      if (r && r.ok) {
+        blocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: r.mimeType || 'image/png',
+            data: r.base64,
+          },
+        });
+      } else {
+        if (log) log('warn', 'attachment fetch failed', { id, status: r && r.status });
+      }
+    } catch (e) {
+      if (log) log('warn', 'attachment fetch threw', {
+        id,
+        error: e && e.message ? e.message : String(e),
+      });
+    }
+  }
+  // No images survived the fetch — fall back to text-only so the turn still
+  // runs (with degraded context). The agent has the envelope; the user will
+  // see their own bubble with images in the bridge UI.
+  if (blocks.length === 0) return envelopeText;
+
+  blocks.push({ type: 'text', text: envelopeText });
+  return (async function* () {
+    yield { type: 'user', message: { role: 'user', content: blocks } };
+  })();
+};
+
 const buildBootstrapPrompt = (payload) =>
   buildEnvelope(payload) +
   '\n\n---\n' +
@@ -290,7 +340,18 @@ const consumeQuery = async (q) => {
 const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
   const sdk = await import('@anthropic-ai/claude-agent-sdk');
   const bridgeServer = await buildBridgeMcpServer({ log });
-  const prompt = buildBootstrapPrompt(payload);
+  // Phase 5a — prior thread history (empty string for brand-new threads).
+  const historyBlock = await buildHistoryBlock({
+    threadId,
+    currentMessageId: payload.messageId,
+    engineName: 'Claude',
+    log,
+  });
+  const prompt = await buildPromptForSdk(
+    payload,
+    historyBlock + buildBootstrapPrompt(payload),
+    log,
+  );
   const options = Object.assign(
     {
       cwd: projectDir,
@@ -303,6 +364,7 @@ const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
     threadId,
     projectDir,
     messageId: payload.messageId,
+    attachments: (payload.attachmentIds || []).length,
   });
 
   const startedAt = Date.now();
@@ -357,7 +419,7 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
 
   const sdk = await import('@anthropic-ai/claude-agent-sdk');
   const bridgeServer = await buildBridgeMcpServer({ log });
-  const prompt = buildEnvelope(payload);
+  const prompt = await buildPromptForSdk(payload, buildEnvelope(payload), log);
   const options = Object.assign(
     {
       resume: sessionId,
@@ -371,6 +433,7 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
     threadId,
     sessionId,
     messageId: payload.messageId,
+    attachments: (payload.attachmentIds || []).length,
   });
 
   const startedAt = Date.now();
@@ -391,13 +454,41 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
   return { stopReason, assistantTextChars, lastJsonlMtimeMs: newMtime };
 };
 
+// A turn that errored before producing ANY assistant output never called
+// bridge_post — from the human's perspective that is pure dead air. Claude is
+// the one engine whose driver doesn't relay output itself, so failures here
+// MUST be surfaced explicitly.
+const turnProducedNothing = (result) =>
+  !!result &&
+  !result.skipped &&
+  String(result.stopReason || '').indexOf('error') !== -1 &&
+  !(result.assistantTextChars > 0);
+
+const postBridgeNotice = async ({ threadId, kind, body, log }) => {
+  try {
+    const r = await bridgeHttp.postMessage({
+      threadId,
+      author: 'claude-bridge',
+      role: 'agent',
+      kind: kind || 'error',
+      body,
+    });
+    if (!r.ok) log('error', 'bridge notice post failed', { threadId, status: r.status });
+  } catch (e) {
+    log('error', 'bridge notice post threw', {
+      threadId,
+      error: e && e.message ? e.message : String(e),
+    });
+  }
+};
+
 const drive = (params) => {
   const key = params.threadId;
   const prev = queues.get(key) || Promise.resolve();
   const next = prev
-    .then(() => {
+    .then(async () => {
       if (params.binding && params.binding.sessionId) {
-        return driveResume({
+        const result = await driveResume({
           threadId: params.threadId,
           sessionId: params.binding.sessionId,
           projectDir: params.binding.projectDir,
@@ -406,18 +497,79 @@ const drive = (params) => {
           payload: params.payload,
           log: params.log,
         });
+
+        // Resume produced zero output and errored — the original engine
+        // session is unusable (moved/deleted JSONL, corrupt state, wrong
+        // machine). Fall back to a FRESH session: the Phase 5a history block
+        // in driveFirstTouch carries the thread context across, so the user
+        // gets a real answer instead of silence. Tell them what happened
+        // first — honest context loss beats quiet failure.
+        if (turnProducedNothing(result)) {
+          params.log('warn', 'resume produced no output — falling back to fresh session with thread history', {
+            threadId: params.threadId,
+            sessionId: params.binding.sessionId,
+            stopReason: result.stopReason,
+          });
+          await postBridgeNotice({
+            threadId: params.threadId,
+            kind: 'status',
+            body: '⚠️ Could not resume the original local session (`' +
+              params.binding.sessionId + '`) — its session file appears to be ' +
+              'missing or unusable. Starting a fresh session seeded with this ' +
+              'thread\'s history…',
+            log: params.log,
+          });
+          const fresh = await driveFirstTouch({
+            threadId: params.threadId,
+            projectDir: (params.binding && params.binding.projectDir) || params.projectDir,
+            payload: params.payload,
+            log: params.log,
+          });
+          if (turnProducedNothing(fresh)) {
+            await postBridgeNotice({
+              threadId: params.threadId,
+              kind: 'error',
+              body: 'The fresh Claude session also failed (' + fresh.stopReason +
+                ') before producing any output. Check the daemon log on the ' +
+                'machine for the underlying SDK error.',
+              log: params.log,
+            });
+          }
+          return fresh;
+        }
+        return result;
       }
-      return driveFirstTouch({
+
+      const result = await driveFirstTouch({
         threadId: params.threadId,
         projectDir: params.projectDir,
         payload: params.payload,
         log: params.log,
       });
+      if (turnProducedNothing(result)) {
+        await postBridgeNotice({
+          threadId: params.threadId,
+          kind: 'error',
+          body: 'The Claude session failed (' + result.stopReason + ') before ' +
+            'producing any output. Check the daemon log on the machine for ' +
+            'the underlying SDK error.',
+          log: params.log,
+        });
+      }
+      return result;
     })
-    .catch((err) => {
+    .catch(async (err) => {
       params.log('error', 'drive failed', {
         threadId: params.threadId,
         error: err && err.message ? err.message : String(err),
+      });
+      // Even hard throws must not be silent on the thread.
+      await postBridgeNotice({
+        threadId: params.threadId,
+        kind: 'error',
+        body: 'Claude turn failed on the daemon: ' +
+          (err && err.message ? err.message : String(err)),
+        log: params.log,
       });
       throw err;
     });

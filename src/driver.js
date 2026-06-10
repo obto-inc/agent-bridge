@@ -1,47 +1,72 @@
 'use strict';
 
-// Agent-agnostic driver selector. The daemon drives whichever coding agent the
-// operator configured — Claude (via the Claude Agent SDK) or Codex (via the
-// Codex SDK) — chosen by `agent` in config.json / the BRIDGE_AGENT env var.
-// Everything else in the daemon (SSE, state, the bridge HTTP client) is
-// agent-neutral; only the driver differs.
+// Dual-driver dispatch (v1.1).
 //
-// The codex driver is require()d lazily, so a Claude-only install never loads
-// @openai/codex-sdk (and vice versa).
+// v1 resolved ONE agent at startup and drove only that. v1.1 makes the daemon
+// agent-agnostic per event: it can drive BOTH Claude (Claude Agent SDK) and
+// Codex (Codex SDK), and routes each bridge event to the right driver by the
+// thread's `agent` field (`payload.agent`, set server-side from the thread's
+// routing record).
+//
+// Drivers are require()d lazily and cached — a machine that only ever runs
+// Claude threads never pays to load @openai/codex-sdk, and vice versa.
 
 const { loadConfig } = require('./config');
 
-let resolved = null;
+const KNOWN_AGENTS = ['claude', 'codex', 'opencode'];
 
-const pick = () => {
-  if (resolved) return resolved;
-  let agent = 'claude';
+const cache = {};
+
+const loadDriver = (name) => {
+  if (cache[name]) return cache[name];
+  let mod;
+  if (name === 'codex') mod = require('./codex-driver');
+  else if (name === 'opencode') mod = require('./opencode-driver');
+  else mod = require('./claude-driver');
+  cache[name] = mod;
+  return mod;
+};
+
+// Fallback agent for events that arrive without an explicit `agent` — an
+// older bridge, or a thread created before v1.1. Reads config.agent (the v1
+// init choice), else 'claude'.
+let fallbackAgent = null;
+const getFallbackAgent = () => {
+  if (fallbackAgent) return fallbackAgent;
+  let a = 'claude';
   try {
-    agent = (loadConfig().agent || 'claude').toLowerCase();
+    a = (loadConfig().agent || 'claude').toLowerCase();
   } catch (_) {
     // config unreadable — default to claude
   }
-  if (agent === 'codex') {
-    resolved = { name: 'codex', mod: require('./codex-driver') };
-  } else {
-    resolved = { name: 'claude', mod: require('./claude-driver') };
-  }
-  return resolved;
+  fallbackAgent = KNOWN_AGENTS.indexOf(a) !== -1 ? a : 'claude';
+  return fallbackAgent;
 };
 
-const drive = (params) => pick().mod.drive(params);
+// Resolve which agent a bridge event targets.
+const agentFor = (payload) => {
+  const a = payload && payload.agent ? String(payload.agent).toLowerCase() : '';
+  if (KNOWN_AGENTS.indexOf(a) !== -1) return a;
+  return getFallbackAgent();
+};
 
-// Permission relay is Claude-only — Codex exposes no per-tool callback. For a
-// Codex daemon this is always a no-op so the reply path goes straight to
-// drive(); for Claude it delegates to the real relay resolver.
+// Drive one bridge event with the agent its thread is bound to.
+const drive = (params) => {
+  const name = agentFor(params && params.payload);
+  return loadDriver(name).drive(params);
+};
+
+// Permission relay is Claude-only — the Codex SDK exposes no per-tool callback.
+// We delegate to the claude driver's resolver regardless of the thread's agent:
+// it keys on threadId against its own pending-request map, so a codex thread
+// (which never has a pending claude request) simply returns false and the
+// reply falls through to drive().
 const tryResolvePermission = (threadId, body, log) => {
-  const p = pick();
-  if (typeof p.mod.tryResolvePermission === 'function') {
-    return p.mod.tryResolvePermission(threadId, body, log);
+  const claude = loadDriver('claude');
+  if (typeof claude.tryResolvePermission === 'function') {
+    return claude.tryResolvePermission(threadId, body, log);
   }
   return false;
 };
 
-const activeAgent = () => pick().name;
-
-module.exports = { drive, tryResolvePermission, activeAgent };
+module.exports = { drive, tryResolvePermission, agentFor, KNOWN_AGENTS };

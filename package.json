@@ -1,6 +1,6 @@
 {
   "name": "@obtoai/agent-bridge",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.25",
   "description": "Local consumer for the OBTO Agent Bridge. Receives bridge events over SSE and drives a coding agent (Claude Code or OpenAI Codex) on your machine.",
   "license": "Apache-2.0",
   "author": "OBTO Inc.",
@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.126",
-    "@openai/codex-sdk": "^0.130.0"
+    "@openai/codex-sdk": "^0.130.0",
+    "@opencode-ai/sdk": "^1.16.1"
   }
 }

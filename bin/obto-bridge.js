@@ -14,7 +14,8 @@ const usage = () => {
   console.error('Usage: obto-bridge <command>');
   console.error('');
   console.error('Commands:');
-  console.error('  init           One-time setup: paste credentials, choose agent name + project dir.');
+  console.error('  init           Create a free account (or paste an existing token via --token/--account)');
+  console.error('                 and write ~/.obto-bridge/config.json.');
   console.error('  start          Run the daemon (foreground).');
   console.error('  status         Print active thread/session bindings.');
   console.error('  whoami         Verify config and show your account info from the server.');
@@ -22,10 +23,12 @@ const usage = () => {
   console.error('  logout         Wipe local credentials at ~/.obto-bridge/config.json.');
   console.error('');
   console.error('Flags:');
-  console.error('  --version, -v  Print the installed package version.');
-  console.error('  --help, -h     Show this help.');
-  console.error('');
-  console.error('Get an invite: support@obto.co');
+  console.error('  --version, -v          Print the installed package version.');
+  console.error('  --help, -h             Show this help.');
+  console.error('  --username <name>      (init only) Override the username derived from email.');
+  console.error('  --password <pwd>       (init only) Set your password instead of auto-generating one.');
+  console.error('  --token <obto_…>       (init only) Skip self-serve register, use this token.');
+  console.error('  --account <acc_…>      (init only) Pair with --token for paste-in mode.');
 };
 
 const cmd = process.argv[2];

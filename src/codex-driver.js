@@ -25,6 +25,9 @@
 const { loadConfig } = require('./config');
 const { buildEnvelope } = require('./claude-driver');
 const bridgeHttp = require('./bridge-http');
+// Phase 5a — Codex has no MCP thread_read; its only shot at prior thread
+// context is inline injection into the first prompt.
+const { buildHistoryBlock } = require('./history');
 
 // Per-thread promise queue — concurrent replies on one thread are serialized
 // so first-touch completes before any resume. Mirrors claude-driver.
@@ -32,8 +35,24 @@ const queues = new Map();
 
 const ALLOW_ALL = process.env.BRIDGE_ALLOW_ALL === '1';
 
-const buildCodexPrompt = (payload, isFirst) => {
-  const head = buildEnvelope(payload);
+// Phase 6.4 — Codex SDK doesn't accept image inputs yet. When the bridge
+// payload carries attachmentIds, we prepend an honest note so the agent
+// knows images existed (the human will see them in their own bubble on the
+// bridge UI). When the SDK gains multimodal support, this can be replaced
+// with a real image-in path.
+const attachmentDropNote = (payload) => {
+  const n = Array.isArray(payload && payload.attachmentIds)
+    ? payload.attachmentIds.filter(Boolean).length
+    : 0;
+  if (!n) return '';
+  return '[OBTO bridge note: ' + n + ' image attachment' + (n === 1 ? '' : 's') +
+    ' came with this message, but the Codex driver does not support image ' +
+    'input yet — proceeding with text only. Ask the human to describe the ' +
+    'image in words if you need its content.]\n\n';
+};
+
+const buildCodexPrompt = (payload, isFirst, historyBlock) => {
+  const head = (historyBlock || '') + attachmentDropNote(payload) + buildEnvelope(payload);
   if (!isFirst) return head;
   return head +
     '\n\n---\n' +
@@ -121,9 +140,22 @@ const driveTurn = async ({ threadId, projectDir, resumeId, payload, log }) => {
   let finalResponse = '';
   let failure = null;
 
+  // Phase 5a — on first touch of a thread with prior bridge history (provider
+  // switch or adopted thread), give Codex that history inline. Resumes don't
+  // need it: the engine session already holds its own context.
+  let historyBlock = '';
+  if (isFirst) {
+    historyBlock = await buildHistoryBlock({
+      threadId,
+      currentMessageId: payload.messageId,
+      engineName: 'Codex',
+      log,
+    });
+  }
+
   try {
     const res = await runCodex({
-      prompt: buildCodexPrompt(payload, isFirst),
+      prompt: buildCodexPrompt(payload, isFirst, historyBlock),
       projectDir,
       resumeId,
     });

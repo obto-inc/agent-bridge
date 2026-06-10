@@ -9,3 +9,6 @@ pnpm-lock.yaml
 
 # npm pack output
 *.tgz
+
+# Unpublished marketing drafts — keep out of the public repo
+MEDIUM_DRAFT_*.md
