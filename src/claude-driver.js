@@ -220,13 +220,26 @@ const buildPermissionOptions = (log, threadId) => {
 
 // ── Driving sessions ──────────────────────────────────────────────────────
 
+// Security — the envelope header is structured metadata the agent reads to
+// know who/what/when. threadId and (less so) author are user-influenced, so a
+// value containing ']', '|', or a newline could forge a second envelope or
+// inject framing. Strip the delimiter chars + control chars from every header
+// field; the body (the actual human message) is left intact — it's meant to
+// be free text and the agent treats it as the task, not as protocol.
+const sanitizeHeaderField = (v) =>
+  String(v == null ? '' : v)
+    .replace(/[\x00-\x1F\x7F]/g, ' ') // control chars (incl. newlines) → space
+    .replace(/[\[\]|]/g, '')          // envelope delimiters
+    .trim()
+    .slice(0, 200);
+
 const buildEnvelope = (payload) => {
   const head =
-    '[OBTO Agent Bridge | thread:' + (payload.threadId || '?') +
-    ' | from:' + (payload.author || 'unknown') +
-    ' | role:' + (payload.role || 'human') +
-    ' | ts:' + (payload.createdAt || new Date().toISOString()) +
-    (payload.messageId ? ' | messageId:' + payload.messageId : '') +
+    '[Agent Bridge | thread:' + sanitizeHeaderField(payload.threadId || '?') +
+    ' | from:' + sanitizeHeaderField(payload.author || 'unknown') +
+    ' | role:' + sanitizeHeaderField(payload.role || 'human') +
+    ' | ts:' + sanitizeHeaderField(payload.createdAt || new Date().toISOString()) +
+    (payload.messageId ? ' | messageId:' + sanitizeHeaderField(payload.messageId) : '') +
     ']';
   const body = (payload.body || '').toString();
   return head + '\n\n' + body;
