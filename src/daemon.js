@@ -13,6 +13,11 @@ const { scanAll: scanExternalSessions } = require('./external-scanner');
 const { scanAll: scanOpencodeSessions } = require('./opencode-sqlite-scanner');
 // Phase 6.6 — full-history backfill for adopted threads (fire-and-forget).
 const { backfillFullHistory } = require('./history');
+// Phase 6.8 — advertise the daemon's own version to the bridge (SSE connect
+// + every sync heartbeat) so the UI can show what each machine is running.
+const DAEMON_VERSION = (() => {
+  try { return require('../package.json').version || 'unknown'; } catch (_) { return 'unknown'; }
+})();
 
 const log = (level, msg, data) => {
   const line = { ts: new Date().toISOString(), level, msg };
@@ -246,6 +251,7 @@ const start = () => {
   const capabilities = detectCapabilities();
 
   log('info', 'starting daemon', {
+    version: DAEMON_VERSION,
     baseUrl: cfg.baseUrl,
     accountId: cfg.accountId,
     agentId: cfg.agentId,
@@ -257,7 +263,8 @@ const start = () => {
   const url = cfg.baseUrl.replace(/\/$/, '') +
     '/api/bridge/stream' +
     '?agentId=' + encodeURIComponent(cfg.agentId) +
-    '&capabilities=' + encodeURIComponent(capabilities.join(','));
+    '&capabilities=' + encodeURIComponent(capabilities.join(',')) +
+    '&version=' + encodeURIComponent(DAEMON_VERSION);
   stream = startStream({
     url,
     // Re-read config on every (re)connect so a rotated token (via
@@ -331,7 +338,7 @@ const externalScanTick = async () => {
       ? [] // incomplete inventory — skip reconciliation this tick
       : all.filter((s) => s && s.sessionId).map((s) => String(s.sessionId));
     if (external.length === 0 && presentSessionIds.length === 0) return;
-    const r = await postExternalSync(cfg.agentId, external, presentSessionIds);
+    const r = await postExternalSync(cfg.agentId, external, presentSessionIds, DAEMON_VERSION);
     if (!r || !r.ok) {
       log('warn', 'external sync rejected', {
         status: r && r.status,

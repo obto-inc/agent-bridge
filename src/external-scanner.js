@@ -74,6 +74,22 @@ const readTail = (filePath, maxBytes = TAIL_READ_BYTES) => {
 // comes first. The first partial line at the buffer boundary is dropped
 // because it won't JSON.parse cleanly; that's fine, the next chunk will
 // pick it up complete.
+// Current Codex rollout records wrap each turn as
+//   {type:'response_item', payload:{type:'message', role, content:[{type:'input_text'|'output_text', text}]}}
+// The message extractors below were written for Claude's {message:{role,content}}
+// and older flat {role,content} codex shapes, so they extracted 0 messages from
+// these rollouts (the agent still resumes — the SDK reads the rollout natively —
+// but the bridge UI showed no history). Flatten a message item to the
+// {role, content} shape the extractors already understand; non-message items
+// (reasoning, function_call, session_meta, turn_context) pass through unchanged
+// and harmlessly fail the role check.
+const unwrapCodexItem = (obj) => {
+  if (obj && obj.type === 'response_item' && obj.payload && obj.payload.type === 'message') {
+    return { role: obj.payload.role, content: obj.payload.content, timestamp: obj.timestamp };
+  }
+  return obj;
+};
+
 const readTailUntilMessages = (filePath) => {
   let fd = null;
   try {
@@ -95,6 +111,7 @@ const readTailUntilMessages = (filePath) => {
         if (!line.trim()) continue;
         let obj;
         try { obj = JSON.parse(line); } catch (_) { continue; }
+        obj = unwrapCodexItem(obj);
         const role = (obj && (obj.role || (obj.message && obj.message.role))) || null;
         if (role !== 'user' && role !== 'assistant') continue;
         const raw = (obj.message && obj.message.content) || obj.content;
@@ -139,6 +156,7 @@ const extractRecentMessages = (jsonlTail, n = RECENT_TURN_COUNT) => {
     if (!line) continue;
     let obj;
     try { obj = JSON.parse(line); } catch (_) { continue; }
+    obj = unwrapCodexItem(obj);
     let role = null, raw = null;
     if (obj && obj.message && (obj.message.role || obj.type)) {
       role = obj.message.role || (obj.type === 'user' ? 'user' : 'assistant');
@@ -267,6 +285,7 @@ const extractTitleFromFile = (filePath) => {
         linesChecked++;
         let obj;
         try { obj = JSON.parse(line); } catch (_) { continue; }
+        obj = unwrapCodexItem(obj);
         let role = null, raw = null;
         if (obj && obj.message && (obj.message.role || obj.type)) {
           role = obj.message.role || (obj.type === 'user' ? 'user' : 'assistant');
@@ -312,6 +331,7 @@ const extractLastMessage = (jsonlTail) => {
     } catch (_) {
       continue;
     }
+    obj = unwrapCodexItem(obj);
 
     // ── Claude Code session JSONL shapes ─────────────────────────────────
     // Common:
@@ -425,11 +445,31 @@ const walkClaudeProjectsRoot = (root) => {
       let title = extractAiTitleFromTail(tail);
       if (!title) title = extractTitleFromFile(filePath);
       const recentMessages = extractRecentMessages(readTailUntilMessages(filePath));
+      // Authoritative cwd: Claude records the real working directory in every
+      // session record, so read it from content. Decoding the encoded dir name
+      // is LOSSY for any path with dashes (".../obto-inc-agent-bridge" decodes
+      // to ".../obto/inc/agent/bridge" — a nonexistent dir, making a resumed
+      // session run in the wrong place). Fall back to the decoded name only
+      // when no cwd is present in the tail.
+      let realCwd = '';
+      let cwdM = tail.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (!cwdM) {
+        // Tail had no cwd (e.g. trailing tool output) — check the head, where
+        // the first turn's envelope records it.
+        try {
+          const fdh = fs.openSync(filePath, 'r');
+          const hb = Buffer.alloc(Math.min(8192, stat.size));
+          fs.readSync(fdh, hb, 0, hb.length, 0);
+          fs.closeSync(fdh);
+          cwdM = hb.toString('utf8').match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        } catch (_) {}
+      }
+      if (cwdM) { try { realCwd = JSON.parse('"' + cwdM[1] + '"'); } catch (_) { realCwd = cwdM[1]; } }
       out.push({
         source: 'claude',
         sessionId,
         projectDir: entry,
-        projectName: decodeClaudeProjectDir(entry),
+        projectName: realCwd || decodeClaudeProjectDir(entry),
         title: title,
         recentMessages: recentMessages,
         lastActivityAt: stat.mtimeMs,
@@ -478,33 +518,51 @@ const scanCodex = () => {
         try { files = fs.readdirSync(dPath); } catch (_) { continue; }
         for (const f of files) {
           if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
-          // session id is the last hex/uuid block before .jsonl
-          const sidMatch = f.match(/-([0-9a-f-]{8,})\.jsonl$/i);
+          // Codex rollout filenames embed an ISO timestamp whose TIME part uses
+          // dashes (rollout-2026-05-22T07-54-05-<uuid>.jsonl). A greedy
+          // "trailing hex+dash" match grabbed the leftover time digits too
+          // (e.g. "54-05-<uuid>"), producing a session id the SDK can't resume.
+          // The id is the trailing UUID — match exactly that 8-4-4-4-12 shape.
+          const sidMatch = f.match(/-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
           if (!sidMatch) continue;
           const sessionId = sidMatch[1];
           const filePath = path.join(dPath, f);
           let stat;
           try { stat = fs.statSync(filePath); } catch (_) { continue; }
 
-          // Read the first KB to pull the session-meta's working directory.
+          // Pull the session-meta's working directory. The first JSONL line is
+          // the session_meta record, but recent Codex builds embed the FULL
+          // system prompt in payload.base_instructions.text — the line runs to
+          // tens of KB, so a small head read truncates it mid-JSON and
+          // JSON.parse throws (losing cwd entirely). `cwd` sits near the front
+          // (right after id), so we read a generous head and, when the parse
+          // fails on the truncated line, pull cwd out directly.
           let projectDir = '';
           let fd = null;
           try {
             fd = fs.openSync(filePath, 'r');
-            const headBuf = Buffer.alloc(Math.min(2048, stat.size));
+            const headBuf = Buffer.alloc(Math.min(16384, stat.size));
             fs.readSync(fd, headBuf, 0, headBuf.length, 0);
-            const firstLine = headBuf.toString('utf8').split(/\r?\n/)[0] || '';
+            const headStr = headBuf.toString('utf8');
+            const firstLine = headStr.split(/\r?\n/)[0] || '';
             try {
               const meta = JSON.parse(firstLine);
               projectDir = String(
+                meta?.payload?.cwd ||
                 meta?.cwd ||
                 meta?.workingDirectory ||
                 meta?.working_directory ||
                 meta?.session_meta?.cwd ||
-                meta?.payload?.cwd ||
                 ''
               );
-            } catch (_) { /* not a meta line — leave projectDir blank */ }
+            } catch (_) { /* huge/truncated meta line — fall through to regex */ }
+            if (!projectDir) {
+              const cwdMatch = headStr.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+              if (cwdMatch) {
+                try { projectDir = JSON.parse('"' + cwdMatch[1] + '"'); }
+                catch (_) { projectDir = cwdMatch[1]; }
+              }
+            }
           } catch (_) {} finally {
             if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} }
           }
@@ -518,7 +576,11 @@ const scanCodex = () => {
           out.push({
             source: 'codex',
             sessionId,
-            projectDir: projectDir || `${y}/${m}/${d}`,
+            // No date fallback: "2026/05/22" is not a real cwd and only tricks
+            // the daemon's adoption guard into thinking it has a path. null =
+            // "cwd unknown", which the daemon handles honestly (first-touch with
+            // injected history instead of a misrouted resume).
+            projectDir: projectDir || null,
             projectName: projectDir || null,
             title: title,
             recentMessages: recentMessages,

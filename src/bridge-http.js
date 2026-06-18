@@ -92,8 +92,8 @@ const claimThread = (threadId, agentId) =>
 // Phase 6.7 — `presentSessionIds` is the FULL on-disk inventory (external +
 // bridge-owned). The bridge marks rows missing from it as vanished so dead
 // sessions stop being adoptable, and restores them if the file reappears.
-const postExternalSync = (agentId, sessions, presentSessionIds) =>
-  postJson('/api/bridge/external/sync', { agentId, sessions, presentSessionIds });
+const postExternalSync = (agentId, sessions, presentSessionIds, version) =>
+  postJson('/api/bridge/external/sync', { agentId, sessions, presentSessionIds, version });
 
 // Phase 6.6 — ship the FULL local session history for an adopted thread.
 // The route replaces the adoption-time partial backfill and is idempotent

@@ -12,6 +12,41 @@ const { buildBridgeMcpServer } = require('./bridge-mcp-server');
 // first prompt so the session starts with context instead of amnesia.
 const { buildHistoryBlock } = require('./history');
 
+// The daemon imports the Claude Agent SDK through an npm-link symlink, and in
+// that context the SDK's own native-binary auto-detection fails with
+// "Claude Code native binary not found" even though the version-matched binary
+// IS present (verified: the bundled binary runs, and passing an explicit path
+// works). So we resolve the binary ourselves and pass it via
+// options.pathToClaudeCodeExecutable. Order: CLAUDE_CODE_PATH env -> the SDK's
+// bundled, version-matched binary (computed from THIS file's real path, so it
+// survives the symlink) -> the user's installed Claude Code (VS Code extension /
+// ~/.claude/local). null lets the SDK attempt its own detection as a last resort.
+const resolveClaudeBinary = () => {
+  const tryPath = (p) => { try { return p && fs.existsSync(p) ? p : null; } catch (_) { return null; } };
+  const env = tryPath(process.env.CLAUDE_CODE_PATH);
+  if (env) return env;
+  const bundled = tryPath(path.join(
+    __dirname, '..', 'node_modules', '@anthropic-ai',
+    'claude-agent-sdk-' + process.platform + '-' + process.arch, 'claude',
+  ));
+  if (bundled) return bundled;
+  try {
+    const extRoot = path.join(os.homedir(), '.vscode', 'extensions');
+    const exts = fs.readdirSync(extRoot)
+      .filter((d) => d.startsWith('anthropic.claude-code-'))
+      .sort().reverse();
+    for (const d of exts) {
+      const p = tryPath(path.join(extRoot, d, 'resources', 'native-binary', 'claude'));
+      if (p) return p;
+    }
+  } catch (_) {}
+  const local = tryPath(path.join(os.homedir(), '.claude', 'local', 'claude'));
+  if (local) return local;
+  return null;
+};
+
+const CLAUDE_BIN = resolveClaudeBinary();
+
 // Per-thread promise queue. Concurrent AMQP messages targeting the same thread
 // are serialized so first-touch session creation completes before any resume,
 // and consecutive resumes don't race the JSONL writer.
@@ -370,6 +405,7 @@ const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
       cwd: projectDir,
       mcpServers: { bridge: bridgeServer },
     },
+    CLAUDE_BIN ? { pathToClaudeCodeExecutable: CLAUDE_BIN } : {},
     buildPermissionOptions(log, threadId),
   );
 
@@ -439,6 +475,7 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
       cwd: projectDir,
       mcpServers: { bridge: bridgeServer },
     },
+    CLAUDE_BIN ? { pathToClaudeCodeExecutable: CLAUDE_BIN } : {},
     buildPermissionOptions(log, threadId),
   );
 
