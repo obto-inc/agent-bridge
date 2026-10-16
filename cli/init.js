@@ -1,18 +1,28 @@
 'use strict';
 
-// `obto-bridge init` — interactive setup wizard.
+// `obto-bridge init` — setup.
 //
-// Default (>=0.1.0-beta.7): self-serve registration. Email is the only
-// required input; username is derived from the email's local part, and a
-// strong password is auto-generated and shown once. Posts to
-// /api/bridge/register, saves the returned API token to
-// ~/.obto-bridge/config.json (mode 0600).
+// Paths, in precedence order:
 //
-// Overrides:
-//   --username <name>    Use this instead of the derived username.
-//   --password <pwd>     Use this instead of an auto-generated password.
-//   --token <obto_…>     Skip registration entirely; paste an existing token.
-//   --account <acc_…>    Pair with --token for paste-in mode.
+//   1. --link <LNK-…>      (>=0.1.0-beta.28, One Thread OT-7b) Trade a one-time
+//                          link code issued from your OBTO account home
+//                          (Agent Bridge → Enable / Add another machine) for an
+//                          API token bound to your OBTO identity. Non-interactive:
+//                          no email, no password, no prompts. Exchange endpoint:
+//                          POST https://app.obto.co/api/bridge/link/exchange.
+//   2. --token + --account Paste an existing token (scripted / headless).
+//   3. Existing config     Reuse ~/.obto-bridge/config.json credentials.
+//   4. Self-serve register Email → /api/bridge/register (legacy bridge-only
+//                          account, not linked to an OBTO login).
+//
+// Other flags:
+//   --username <name>      (register) Use this instead of the derived username.
+//   --password <pwd>       (register) Use this instead of an auto-generated one.
+//   --agent-id <name>      Machine name shown in the UI (default: hostname).
+//   --project-dir <path>   Directory the daemon drives agents in (default: cwd).
+//   --discovery <level>    'metadata' (default) | 'full' — what the local
+//                          session scanner sends to the bridge. See README.
+//   --link-url <url>       Override the exchange endpoint (self-hosted).
 
 const fs = require('fs');
 const path = require('path');
@@ -26,8 +36,12 @@ const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 const DEFAULTS = {
   baseUrl: 'https://agent-bridge.obto.co',
   originHost: 'agent-bridge.obto.co',
+  linkUrl: 'https://app.obto.co/api/bridge/link/exchange',
   relayPermissions: true,
+  discovery: 'metadata',
 };
+
+const DISCOVERY_LEVELS = ['metadata', 'full'];
 
 // argv after `obto-bridge init`.
 const argv = process.argv.slice(3);
@@ -39,6 +53,11 @@ const cliToken = flagValue('--token');
 const cliAccount = flagValue('--account');
 const cliUsername = flagValue('--username');
 const cliPassword = flagValue('--password');
+const cliLink = flagValue('--link');
+const cliLinkUrl = flagValue('--link-url');
+const cliAgentId = flagValue('--agent-id');
+const cliProjectDir = flagValue('--project-dir');
+const cliDiscovery = flagValue('--discovery');
 
 const loadExisting = () => {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
@@ -76,6 +95,10 @@ const generatePassword = () => {
   return out.slice(0, 4) + '-' + out.slice(4, 8) + '-' + out.slice(8, 12);
 };
 
+const parseJsonLoose = (text) => {
+  try { return JSON.parse(text); } catch (_) { return { _rawBody: text }; }
+};
+
 const registerSelfServe = async ({ baseUrl, originHost, email, username, password }) => {
   const url = baseUrl.replace(/\/$/, '') + '/api/bridge/register';
   const res = await fetch(url, {
@@ -90,9 +113,24 @@ const registerSelfServe = async ({ baseUrl, originHost, email, username, passwor
     redirect: 'manual',
   });
   const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch (_) { data = { _rawBody: text }; }
-  return { status: res.status, ok: res.ok, data };
+  return { status: res.status, ok: res.ok, data: parseJsonLoose(text) };
+};
+
+// One Thread OT-7b — trade a one-time link code for a token. The code IS the
+// credential (one exchange per code, ever), so no bearer header is sent.
+const exchangeLinkCode = async ({ linkUrl, code, agentId }) => {
+  const res = await fetch(linkUrl, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ code, agentId }),
+    cache: 'no-store',
+    redirect: 'manual',
+  });
+  const text = await res.text();
+  return { status: res.status, ok: res.ok, data: parseJsonLoose(text) };
 };
 
 const validateAgainstServer = async (cfg) => {
@@ -107,12 +145,179 @@ const validateAgainstServer = async (cfg) => {
     cache: 'no-store',
   });
   const text = await res.text();
-  let parsed;
-  try { parsed = JSON.parse(text); } catch (_) { parsed = { _rawBody: text }; }
-  return { status: res.status, ok: res.ok, parsed };
+  return { status: res.status, ok: res.ok, parsed: parseJsonLoose(text) };
 };
 
+const normalizeDiscovery = (raw, fallback) => {
+  const v = String(raw || '').trim().toLowerCase();
+  if (DISCOVERY_LEVELS.indexOf(v) !== -1) return v;
+  return fallback;
+};
+
+const writeConfig = (cfg, existing) => {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  // Keep the previous file when we are about to overwrite a token — the
+  // same pattern rotate-token uses. Never printed, mode 0600.
+  if (existing && existing.apiToken && existing.apiToken !== cfg.apiToken) {
+    try {
+      fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak.' + Math.floor(Date.now() / 1000));
+    } catch (_) {}
+  }
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  fs.chmodSync(CONFIG_PATH, 0o600);
+};
+
+const LINK_FIX =
+  '  Issue a fresh code: app.obto.co → account home → Agent Bridge → "Add another machine",\n' +
+  '  then run:  npx @obtoai/agent-bridge@latest init --link <LNK-…>';
+
+// ─── Path 1: --link <code> (non-interactive) ──────────────────────────────
+const linkMain = async () => {
+  const existing = loadExisting();
+  const baseUrl    = process.env.BRIDGE_BASE_URL    || existing.baseUrl    || DEFAULTS.baseUrl;
+  const originHost = process.env.BRIDGE_ORIGIN_HOST || existing.originHost || DEFAULTS.originHost;
+  const linkUrl    = cliLinkUrl || process.env.BRIDGE_LINK_URL || existing.linkUrl || DEFAULTS.linkUrl;
+
+  const code = String(cliLink).trim().toUpperCase();
+  if (!/^LNK(-[A-Z0-9]{4}){4}$/.test(code)) {
+    console.error('error: a link code looks like LNK-XXXX-XXXX-XXXX-XXXX (got "' + cliLink + '").');
+    console.error(LINK_FIX);
+    process.exit(1);
+  }
+
+  const agentId = cliAgentId || process.env.AGENT_ID || existing.agentId ||
+    os.hostname().split('.')[0] || 'unnamed-agent';
+  const projectDir = path.resolve(
+    cliProjectDir || process.env.BRIDGE_PROJECT_DIR || existing.projectDir || process.cwd(),
+  );
+  const agent = ['claude', 'codex', 'opencode'].indexOf(String(existing.agent || '').toLowerCase()) !== -1
+    ? String(existing.agent).toLowerCase()
+    : 'claude';
+  const relayPermissions = existing.relayPermissions !== undefined
+    ? !!existing.relayPermissions
+    : DEFAULTS.relayPermissions;
+  const discovery = normalizeDiscovery(
+    cliDiscovery || process.env.BRIDGE_DISCOVERY,
+    normalizeDiscovery(existing.discovery, DEFAULTS.discovery),
+  );
+  if (cliDiscovery && normalizeDiscovery(cliDiscovery, null) === null) {
+    console.error('error: --discovery must be one of: ' + DISCOVERY_LEVELS.join(', '));
+    process.exit(1);
+  }
+
+  console.log('OBTO Agent Bridge — link this machine');
+  console.log('-------------------------------------');
+  console.log('Exchanging link code ' + code.slice(0, 8) + '… at ' + linkUrl + ' (machine "' + agentId + '") ...');
+
+  let r;
+  try {
+    r = await exchangeLinkCode({ linkUrl, code, agentId });
+  } catch (e) {
+    const cause = e && e.cause && (e.cause.code || e.cause.message);
+    console.error('error: cannot reach ' + linkUrl + ': ' + (e && e.message ? e.message : e) +
+      (cause ? ' (' + cause + ')' : ''));
+    console.error('  Check your network, then retry. The code stays valid until it expires (~15 min).');
+    process.exit(2);
+  }
+
+  if (r.status === 404 || (r.data && r.data.error === 'link_code_invalid')) {
+    console.error('error: link code invalid, expired, or already used (HTTP ' + r.status + ' link_code_invalid).');
+    console.error(LINK_FIX);
+    process.exit(3);
+  }
+  if (r.status === 403 || (r.data && r.data.error === 'account_suspended')) {
+    console.error('error: the bridge account for this identity is suspended (HTTP 403). Email support@obto.co.');
+    process.exit(3);
+  }
+  if (!r.ok || !r.data || !r.data.ok || !r.data.apiToken || !r.data.accountId) {
+    const msg = (r.data && (r.data.error || r.data._rawBody)) || ('HTTP ' + r.status);
+    console.error('error: link exchange rejected: ' + String(msg).slice(0, 300));
+    console.error(LINK_FIX);
+    process.exit(3);
+  }
+
+  const d = r.data;
+  if (!/^acc_[a-z0-9]+$/i.test(d.accountId) || !/^obto_[a-z0-9]+$/i.test(d.apiToken)) {
+    console.error('error: unexpected credential shape in the exchange response. Not saving.');
+    process.exit(3);
+  }
+
+  const cfg = Object.assign({}, existing, {
+    baseUrl,
+    originHost,
+    linkUrl,
+    accountId: d.accountId,
+    apiToken: d.apiToken,
+    agentId,
+    agent,
+    projectDir,
+    relayPermissions,
+    discovery,
+    tenant: d.tenant || null,
+    linkedAt: new Date().toISOString(),
+  });
+
+  try {
+    writeConfig(cfg, existing);
+  } catch (err) {
+    console.error('error: failed to write config: ' + (err && err.message ? err.message : err));
+    process.exit(1);
+  }
+
+  const t = d.tenant || {};
+  const how = d.created ? 'new bridge account' : (d.adopted ? 'adopted your existing bridge account' : 'token rotated');
+  console.log('');
+  if (t.obtoDomain) {
+    console.log('✓ linked to ' + t.obtoDomain + ' as ' + (t.obtoUserName || t.obtoUserId || '?') + '  (' + how + ')');
+  } else {
+    console.log('✓ linked  (' + how + '; the server returned no tenant — account ' + d.accountId + ')');
+  }
+  console.log('  Account:   ' + d.accountId);
+  console.log('  Machine:   ' + agentId);
+  console.log('  Project:   ' + projectDir);
+  console.log('  Discovery: ' + discovery + (discovery === 'metadata'
+    ? '  (titles, paths, timestamps, ≤200-char preview; no transcript turns)'
+    : '  (recent turns of every local session are sent to the bridge)'));
+  console.log('  Config:    ' + CONFIG_PATH);
+  if (d.rotated) {
+    console.log('  Note: any other machine still using the previous token is now signed out;');
+    console.log('        re-link it with its own code from "Add another machine".');
+  }
+
+  // Verify the new token against the bridge. Non-fatal on network failure.
+  let result;
+  try {
+    result = await validateAgainstServer(cfg);
+  } catch (err) {
+    console.warn('  ⚠ could not reach ' + baseUrl + ' to verify: ' + (err && err.message ? err.message : err));
+    console.warn('    Config is saved; run `obto-bridge whoami` once you have a network.');
+  }
+  if (result) {
+    if (result.ok && result.parsed && result.parsed.account) {
+      console.log('  ✓ token verified against ' + baseUrl);
+    } else {
+      console.warn('  ⚠ token verification returned HTTP ' + result.status +
+        (result.parsed && result.parsed.error ? ' ' + result.parsed.error : '') +
+        ' — run `obto-bridge whoami` to retry.');
+    }
+  }
+
+  console.log('');
+  console.log('Next:  obto-bridge install-service     # run the daemon in the background, start at login');
+  console.log('  or:  obto-bridge start               # foreground');
+};
+
+// ─── Paths 2–4: paste-in / existing / self-serve register ─────────────────
 const main = async () => {
+  if (cliLink !== null || argv.indexOf('--link') !== -1) {
+    if (!cliLink) {
+      console.error('error: --link needs a code, e.g. --link LNK-XXXX-XXXX-XXXX-XXXX');
+      console.error(LINK_FIX);
+      process.exit(1);
+    }
+    return linkMain();
+  }
+
   console.log('OBTO Agent Bridge — setup');
   console.log('-------------------------');
   console.log('Config will be written to: ' + CONFIG_PATH);
@@ -127,10 +332,6 @@ const main = async () => {
   let accountId = existing.accountId || '';
   let apiToken = existing.apiToken || '';
 
-  // Pick the credential path. Precedence:
-  //   1. --token + --account flags (machine paste-in, scripted).
-  //   2. Existing config from a prior init.
-  //   3. Self-serve registration via /api/bridge/register (default).
   const haveCliPaste = !!(cliToken && cliAccount);
   const haveExisting = !!(existing.accountId && existing.apiToken);
 
@@ -145,11 +346,18 @@ const main = async () => {
   } else if (haveExisting) {
     console.log('Existing config found:');
     console.log('  Account: ' + existing.accountId);
-    console.log('  Token:   ' + (existing.apiToken || '').slice(0, 10) + '…');
-    console.log('Reusing those credentials. To re-register from scratch, remove ' + CONFIG_PATH + ' first.');
+    console.log('  Token:   (set)');
+    if (existing.tenant && existing.tenant.obtoDomain) {
+      console.log('  Linked:  ' + existing.tenant.obtoDomain + ' as ' + (existing.tenant.obtoUserName || '?'));
+    }
+    console.log('Reusing those credentials. To link this machine to your OBTO login instead, run');
+    console.log('`obto-bridge init --link <LNK-…>` with a code from app.obto.co → account home → Agent Bridge.');
     console.log('');
   } else {
-    console.log('Create a free account (no card needed):');
+    console.log('Have an OBTO login? Stop here and run `obto-bridge init --link <LNK-…>` instead');
+    console.log('(code from app.obto.co → account home → Agent Bridge → Enable). Otherwise:');
+    console.log('');
+    console.log('Create a free bridge-only account (no card needed):');
     const email = await ask(rl, '  Email', '');
     if (!email || email.indexOf('@') === -1) {
       console.error('error: a valid email is required.');
@@ -196,13 +404,16 @@ const main = async () => {
     console.log('');
   }
 
-  const agentId    = await ask(rl, 'Agent name (e.g. my-mac)', existing.agentId || os.hostname().split('.')[0] || 'unnamed-agent');
-  const projectDir = await ask(rl, 'Project working dir',      existing.projectDir || process.cwd());
+  const agentId    = cliAgentId || await ask(rl, 'Agent name (e.g. my-mac)', existing.agentId || os.hostname().split('.')[0] || 'unnamed-agent');
+  const projectDir = cliProjectDir || await ask(rl, 'Project working dir',      existing.projectDir || process.cwd());
   const agentAns   = await ask(rl, 'Coding agent fallback — claude / codex / opencode', existing.agent || 'claude');
   const agentLow   = String(agentAns).trim().toLowerCase();
   const agent      = ['claude', 'codex', 'opencode'].indexOf(agentLow) !== -1 ? agentLow : 'claude';
   const relayAns   = await ask(rl, 'Relay permission requests via bridge? (y/n)', existing.relayPermissions !== false ? 'y' : 'n');
   const relayPermissions = String(relayAns).toLowerCase().startsWith('y');
+  const discoveryDef = normalizeDiscovery(existing.discovery, DEFAULTS.discovery);
+  const discoveryAns = cliDiscovery || await ask(rl, 'Session discovery sent to the bridge — metadata / full', discoveryDef);
+  const discovery = normalizeDiscovery(discoveryAns, discoveryDef);
 
   rl.close();
 
@@ -219,7 +430,7 @@ const main = async () => {
     process.exit(1);
   }
 
-  const cfg = {
+  const cfg = Object.assign({}, existing, {
     baseUrl,
     originHost,
     accountId,
@@ -228,12 +439,11 @@ const main = async () => {
     agent,
     projectDir: path.resolve(projectDir),
     relayPermissions,
-  };
+    discovery,
+  });
 
   try {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
-    fs.chmodSync(CONFIG_PATH, 0o600);
+    writeConfig(cfg, existing);
   } catch (err) {
     console.error('error: failed to write config: ' + (err && err.message ? err.message : err));
     process.exit(1);
@@ -252,7 +462,7 @@ const main = async () => {
     console.warn('  ⚠ could not reach the server: ' + (err && err.message ? err.message : err));
     console.warn('    Config is saved; run `obto-bridge whoami` once you have a network.');
     console.log('');
-    console.log('Next:  obto-bridge start');
+    console.log('Next:  obto-bridge install-service   (or `obto-bridge start` for foreground)');
     return;
   }
 
@@ -265,7 +475,7 @@ const main = async () => {
     // sign-in form (unauthenticated) or the threads UI (authenticated).
     const signInUrl = baseUrl.replace(/\/$/, '') + '/api/view';
     console.log('Sign in at ' + signInUrl + ' as ' + a.basicAuthUser + (registeredPassword ? ' (password above)' : '') + '.');
-    console.log('Run:    obto-bridge start');
+    console.log('Run:    obto-bridge install-service   (or `obto-bridge start` for foreground)');
     return;
   }
 

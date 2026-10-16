@@ -25,6 +25,68 @@ const log = (level, msg, data) => {
   console.log(JSON.stringify(line));
 };
 
+// One Thread OT-7b — health file for `obto-bridge status`. Rewritten on every
+// stream / sync state change; tiny JSON, atomic rename. Never carries the
+// token.
+const fs = require('fs');
+const { STATUS_PATH } = require('./service');
+const { FATAL_STATUSES } = require('./stream-client');
+const health = {
+  pid: process.pid,
+  version: DAEMON_VERSION,
+  startedAt: new Date().toISOString(),
+  stream: 'starting',
+  connectedAt: null,
+  unreachableSince: null,
+  lastStreamError: null,
+  lastSyncAt: null,
+  lastSyncOk: null,
+  lastSync: null,
+  updatedAt: null,
+};
+const writeHealth = (patch) => {
+  try {
+    Object.assign(health, patch || {});
+    health.updatedAt = new Date().toISOString();
+    fs.mkdirSync(require('path').dirname(STATUS_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(STATUS_PATH + '.tmp', JSON.stringify(health, null, 2), { mode: 0o600 });
+    fs.renameSync(STATUS_PATH + '.tmp', STATUS_PATH);
+  } catch (_) {}
+};
+
+// 401 / 402 / 403 from the bridge mean "this token will never work again
+// until a human acts" — retrying every 30 s only spams the server. Print the
+// fix, record it for `obto-bridge status`, and exit. Under the service unit
+// (OBTO_BRIDGE_SERVICE=1) exit 0 so launchd/systemd do NOT restart us;
+// foreground exits 78 (EX_CONFIG).
+const fixFor = (status) => {
+  if (status === 402) {
+    return 'HTTP 402 payment required: this bridge account has no active plan.\n' +
+      'Linked to an OBTO login? Check your tenant plan at https://app.obto.co (account home).\n' +
+      'Bridge-only account? Subscribe at https://agent-bridge.obto.co/api/bridge/billing\n' +
+      'then run: obto-bridge install-service   (or obto-bridge start)';
+  }
+  if (status === 403) {
+    return 'HTTP 403: this bridge account is suspended. Email support@obto.co.';
+  }
+  return 'HTTP 401: the API token was rejected (revoked by "Disable Bridge", rotated, or another\n' +
+    'machine re-linked with a new code). Issue a fresh code: https://app.obto.co → account home →\n' +
+    'Agent Bridge → "Add another machine", then run:\n' +
+    '  obto-bridge init --link <LNK-…>   &&   obto-bridge install-service';
+};
+let fatalHandled = false;
+const fatalAuth = (status, where, body) => {
+  if (fatalHandled) return;
+  fatalHandled = true;
+  stopped = true;
+  const fix = fixFor(status);
+  log('error', 'daemon stopped: bridge refused the token', { status, where, body: body || '', fix });
+  writeHealth({ stream: 'fatal', fatalStatus: status, fatalAt: new Date().toISOString(), fatalWhere: where, fix });
+  try { stream && stream.stop(); } catch (_) {}
+  if (externalScanTimer) { try { clearInterval(externalScanTimer); } catch (_) {} }
+  setTimeout(() => process.exit(process.env.OBTO_BRIDGE_SERVICE ? 0 : 78), 200);
+};
+
 // Fire-and-forget activity ping. The "agent is working" indicator is a UX
 // nicety — a failed ping must never interfere with the actual turn, so we
 // swallow every error and never await it in the hot path. We still log both
@@ -257,6 +319,8 @@ const start = () => {
     agentId: cfg.agentId,
     capabilities,
     projectDir: cfg.projectDir,
+    discovery: cfg.discovery,
+    service: !!process.env.OBTO_BRIDGE_SERVICE,
     boundThreads: Object.keys(state.bindings || {}),
   });
 
@@ -282,8 +346,20 @@ const start = () => {
         log('error', 'handleEvent threw', { error: err && err.message });
       });
     },
+    onStatus: (st) => {
+      if (!st) return;
+      if (st.state === 'connected') {
+        writeHealth({ stream: 'connected', connectedAt: st.at, unreachableSince: null, lastStreamError: null });
+      } else if (st.state === 'lost') {
+        writeHealth({ stream: 'reconnecting', lastStreamError: st.error || null });
+      } else if (st.state === 'failed') {
+        writeHealth({ stream: 'reconnecting', lastStreamError: st.error || null, unreachableSince: st.unreachableSince || health.unreachableSince });
+      }
+    },
+    onFatal: (err) => fatalAuth(err && err.status, 'stream', err && err.body),
     log,
   });
+  writeHealth({ stream: 'connecting' });
 
   // Phase 6.1 — kick off the External Thread Discovery scanner. 10s startup
   // delay (lets the SSE handshake settle first), then 30s ticks. Was defined
@@ -338,24 +414,57 @@ const externalScanTick = async () => {
       ? [] // incomplete inventory — skip reconciliation this tick
       : all.filter((s) => s && s.sessionId).map((s) => String(s.sessionId));
     if (external.length === 0 && presentSessionIds.length === 0) return;
-    const r = await postExternalSync(cfg.agentId, external, presentSessionIds, DAEMON_VERSION);
+    const payload = shapeForDiscovery(external, cfg.discovery);
+    const r = await postExternalSync(cfg.agentId, payload, presentSessionIds, DAEMON_VERSION, cfg.discovery);
     if (!r || !r.ok) {
       log('warn', 'external sync rejected', {
         status: r && r.status,
         body: r && r.data,
         count: external.length,
       });
+      writeHealth({ lastSyncAt: new Date().toISOString(), lastSyncOk: false,
+        lastSync: { status: r && r.status, error: r && r.data && (r.data.error || r.data._rawBody && String(r.data._rawBody).slice(0, 120)) } });
+      if (r && FATAL_STATUSES.indexOf(r.status) !== -1) {
+        fatalAuth(r.status, 'externalSync', r.data && (r.data.error || ''));
+      }
     } else {
       log('debug', 'external sync ok', {
         sent: external.length,
+        discovery: cfg.discovery,
         upserted: (r.data && r.data.count) || 0,
         vanished: (r.data && r.data.vanished) || 0,
         restored: (r.data && r.data.restored) || 0,
+        canonical: (r.data && r.data.canonical) || undefined,
       });
+      writeHealth({ lastSyncAt: new Date().toISOString(), lastSyncOk: true,
+        lastSync: { sent: external.length, discovery: cfg.discovery,
+          upserted: (r.data && r.data.count) || 0, canonical: (r.data && r.data.canonical) || null } });
     }
   } catch (e) {
-    log('warn', 'external scan failed', { error: e && e.message ? e.message : String(e) });
+    const { describeError } = require('./stream-client');
+    log('warn', 'external scan failed', { error: describeError(e) });
+    writeHealth({ lastSyncAt: new Date().toISOString(), lastSyncOk: false, lastSync: { error: describeError(e) } });
   }
+};
+
+// One Thread OT-7b — privacy shaping of the discovery payload.
+//   'metadata' (default): drop recentMessages entirely; keep sessionId,
+//                         source, projectDir/projectName, title, timestamps
+//                         and the ≤200-char lastMessagePreview.
+//   'full':               send the scanner output as-is (last ~10 turns).
+// The bridge (BridgeExternal.autoAdoptSessions) mirrors recentMessages into
+// the canonical thread ONLY when the payload says discovery:'full', so the
+// strip here is belt-and-braces: a metadata machine never ships a transcript.
+const shapeForDiscovery = (sessions, discovery) => {
+  if (discovery === 'full') return sessions;
+  return sessions.map((s) => {
+    const o = Object.assign({}, s);
+    delete o.recentMessages;
+    if (typeof o.lastMessagePreview === 'string' && o.lastMessagePreview.length > 200) {
+      o.lastMessagePreview = o.lastMessagePreview.slice(0, 200);
+    }
+    return o;
+  });
 };
 const startExternalSync = () => {
   // Wait 10s after daemon start before the first scan so the SSE connection
@@ -370,6 +479,7 @@ const shutdown = (signal) => {
   if (stopped) return;
   stopped = true;
   log('info', 'shutting down', { signal });
+  writeHealth({ stream: 'stopped', stoppedAt: new Date().toISOString(), signal });
   try { stream && stream.stop(); } catch (_) {}
   if (externalScanTimer) { try { clearInterval(externalScanTimer); } catch (_) {} }
   setTimeout(() => process.exit(0), 200);

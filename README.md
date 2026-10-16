@@ -4,13 +4,15 @@ A local daemon that lets coding agents — [Claude Code](https://claude.ai/code)
 
 You post a message on a thread from your phone or laptop. The daemon (running on your machine, no port forwarding required) receives it over a long-lived HTTPS stream, spawns or resumes a session for the agent that thread is bound to, and the response posts back to the bridge thread within seconds.
 
-**Three commands, you're driving Claude/Codex/opencode on your phone:**
+**Have an OBTO login? Three commands and every local Claude Code / Codex / opencode session shows up in your OBTO DevZone:**
 
 ```bash
 npm install -g @obtoai/agent-bridge
-obto-bridge init     # creates a free account inline — no card, no invite
-obto-bridge start    # daemon connects, you're live
+obto-bridge init --link LNK-XXXX-XXXX-XXXX-XXXX   # code from app.obto.co → account home → Agent Bridge → Enable
+obto-bridge install-service                       # daemon runs in the background, starts at login
 ```
+
+No OBTO login yet? `obto-bridge init` still creates a bridge-only account inline — see [Setup](#setup).
 
 ## Status
 
@@ -46,6 +48,31 @@ npx @obtoai/agent-bridge <command>
 
 ## Setup
 
+### Linked to your OBTO login (recommended)
+
+1. Sign in at `https://app.obto.co`, open your account home and click **Enable Bridge** (or **Add another machine** if the module is already on). You get a one-time code `LNK-XXXX-XXXX-XXXX-XXXX` — single use, expires in ~15 minutes.
+2. On the machine:
+
+```bash
+npx @obtoai/agent-bridge@latest init --link LNK-XXXX-XXXX-XXXX-XXXX
+```
+
+That `POST`s the code to `https://app.obto.co/api/bridge/link/exchange` and saves the returned `{accountId, apiToken, tenant}` to `~/.obto-bridge/config.json` (mode 0600). No email, no password, no prompts. It prints `✓ linked to <tenant> as <your OBTO user>`. Optional flags: `--agent-id <machine name>` (default: hostname), `--project-dir <path>` (default: current directory), `--discovery metadata|full` (see [Data handling](#data-handling)).
+
+A code that was already used, or expired, answers `HTTP 404 link_code_invalid` — issue a new one from account home → **Add another machine**. Re-linking an account that already has a token **rotates** the token: other machines on the same account are signed out until they re-link with their own code.
+
+3. Run it as a service (macOS launchd / Linux systemd `--user`):
+
+```bash
+npm install -g @obtoai/agent-bridge     # the service needs a permanent install, not the npx cache
+obto-bridge install-service
+obto-bridge status                      # → Daemon: connected
+```
+
+Within a minute your account home card shows the machine online and every local session appears as a thread in DevZone (titles, paths, timestamps and a short preview by default — see [Data handling](#data-handling)).
+
+### Bridge-only account (no OBTO login)
+
 ```bash
 obto-bridge init
 ```
@@ -57,6 +84,7 @@ Overrides:
 - `obto-bridge init --username <name>` — pick your own username instead of the derived one.
 - `obto-bridge init --password <pwd>` — set your own password instead of auto-generating.
 - `obto-bridge init --token obto_xxxxxxxx --account acc_xxxxxxxx` — skip registration entirely (paste-in for existing users or scripted/headless setups).
+- `obto-bridge init --agent-id <name> --project-dir <path> --discovery metadata|full` — answer those prompts from the command line.
 
 The API token is shown to you exactly once at registration time. **Save it.** If you lose it, rotate it from your account settings — it is not stored in readable form server-side. Safe to commit your `accountId`; **never commit the `apiToken`**. (Server URL is a built-in default; advanced / self-hosted users can override with the `BRIDGE_BASE_URL` env var.)
 
@@ -77,6 +105,21 @@ Picking a model is done in the bridge UI's **+ New thread** dialog and the threa
 You can run the same account's daemon on more than one machine (e.g. a Mac and a Windows box). Each daemon advertises its `agentId` (machine name) + capabilities on connect; threads are atomically **first-touch claimed** by whichever daemon gets the event first, and every other daemon skips the event cleanly. No duplicate replies, no special configuration — just install + start the daemon on each machine.
 
 ## Run
+
+### As a service (recommended)
+
+```bash
+obto-bridge install-service
+```
+
+- **macOS:** writes `~/Library/LaunchAgents/com.obto.agent-bridge.plist` and loads it (`RunAtLoad`, `KeepAlive` on crash only, 30 s throttle). The PATH baked into the plist is your current shell PATH plus the directory of the `node` that ran the command, so nvm installs and `claude`/`codex`/`opencode` resolve.
+- **Linux:** writes `~/.config/systemd/user/obto-bridge.service` (`Restart=on-failure`, `RestartSec=30`) and runs `systemctl --user enable --now`. For a box you are not logged in to, also run `loginctl enable-linger $USER`.
+- Logs go to `~/.obto-bridge/daemon.log` (a log over 10 MB is rotated to `daemon.log.1` once at install time).
+- Re-run `install-service` after `init --link` to pick up a new token; `obto-bridge uninstall-service` removes the unit (config and logs stay).
+
+**Reconnects and failures.** The SSE stream reconnects with capped exponential backoff (1 s → 60 s, jittered). While the bridge is unreachable the log prints one `cannot reach the bridge for N min` line per minute, with the real network error (`ENOTFOUND`, `ECONNREFUSED`, …) instead of a bare `fetch failed`, and `obto-bridge status` shows `reconnecting`. A **401** (token revoked by *Disable Bridge*, a rotation, or another machine re-linking), **402** (no plan) or **403** (suspended) is final: the daemon prints the fix, records it for `status`, and exits *without* being restarted by the service — retrying a dead token every 30 s helps nobody. Re-link and run `install-service` again.
+
+### Foreground
 
 ```bash
 obto-bridge start
@@ -103,7 +146,9 @@ Within ~5–10 seconds you should see the agent's reply appear back on the threa
 | Command | What it does |
 |---|---|
 | `obto-bridge whoami` | Verify your token works + show your account info |
-| `obto-bridge status` | List bindings per (thread, agent) — one row per engine that's ever driven a thread |
+| `obto-bridge status` | Daemon health (`connected` / `reconnecting` / `stopped (auth)` with the fix), last sync, service state, then bindings per (thread, agent). `--json` for scripts |
+| `obto-bridge install-service` / `uninstall-service` | Background daemon via launchd (macOS) or systemd `--user` (Linux) |
+| `obto-bridge rotate-token` | Rotate the API token (bridge-only accounts; linked accounts re-link with a new code instead) |
 | `obto-bridge logout` | Wipe `~/.obto-bridge/config.json` |
 
 ## How it actually works
@@ -138,6 +183,15 @@ The daemon runs your chosen agent on your machine with **your** credentials — 
 ## Data handling
 
 **Your model traffic never touches us.** The daemon runs on your machine and calls Anthropic, OpenAI, or whichever provider opencode is configured for, with *your own* credentials. Your prompts, your code, and the model's responses pass directly between your machine and the model provider, under your own API account and its terms. OBTO does not proxy, route, or see that traffic.
+
+**Session discovery (`discovery` in `~/.obto-bridge/config.json`, or `BRIDGE_DISCOVERY`).** Every 30 s the daemon scans the local session stores of Claude Code, Codex and opencode and reports them to the bridge so they appear in your OBTO DevZone. What leaves the machine depends on one setting:
+
+| `discovery` | Sent per session | Default |
+|---|---|---|
+| `metadata` | session id, engine, project path, title, timestamps, one ≤200-character preview of the last message. **No transcript turns** — `recentMessages` is stripped before the request is built. | yes |
+| `full` | all of the above plus the last ~10 turns (`recentMessages`), so adopted threads show history before your first reply | opt-in: `obto-bridge init --link … --discovery full`, or edit the key and restart |
+
+The request carries the level (`discovery: "metadata"|"full"`) and the bridge mirrors transcript turns only when it says `full`.
 
 **What the bridge stores.** For threads to work, the messages you and the agent post are saved in OBTO's database — that's what makes a thread durable and readable from your phone. Threads are strictly scoped to your account; one tenant can never see another's. Your daemon's API token is stored server-side only as a SHA-256 hash; the plaintext token never leaves your local config file.
 

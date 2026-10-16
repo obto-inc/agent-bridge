@@ -51,6 +51,15 @@ const loadConfig = () => {
       parseInt(process.env.BRIDGE_LIVE_THRESHOLD_MS, 10) ||
       file.liveThresholdMs ||
       60000,
+    // One Thread OT-7b — what the 30 s local-session scanner sends to the
+    // bridge. 'metadata' (default): sessionId, project path, title,
+    // timestamps and a ≤200-char last-message preview — NO transcript turns.
+    // 'full': also the last ~10 turns (recentMessages), so adopted threads
+    // show history before the first reply. Anything else → 'metadata'.
+    discovery: (() => {
+      const v = String(process.env.BRIDGE_DISCOVERY || file.discovery || 'metadata').trim().toLowerCase();
+      return v === 'full' ? 'full' : 'metadata';
+    })(),
   };
 
   if (!cfg.apiToken) {

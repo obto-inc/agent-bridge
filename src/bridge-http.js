@@ -92,8 +92,13 @@ const claimThread = (threadId, agentId) =>
 // Phase 6.7 — `presentSessionIds` is the FULL on-disk inventory (external +
 // bridge-owned). The bridge marks rows missing from it as vanished so dead
 // sessions stop being adoptable, and restores them if the file reappears.
-const postExternalSync = (agentId, sessions, presentSessionIds, version) =>
-  postJson('/api/bridge/external/sync', { agentId, sessions, presentSessionIds, version });
+// One Thread OT-7b — `discovery` ('metadata' | 'full') tells the bridge what
+// the payload carries so auto-adoption (OT-7a) mirrors the right amount. Under
+// 'metadata' the caller has already stripped recentMessages (daemon.js).
+const postExternalSync = (agentId, sessions, presentSessionIds, version, discovery) =>
+  postJson('/api/bridge/external/sync', {
+    agentId, sessions, presentSessionIds, version, discovery: discovery || 'metadata',
+  });
 
 // Phase 6.6 — ship the FULL local session history for an adopted thread.
 // The route replaces the adoption-time partial backfill and is idempotent
