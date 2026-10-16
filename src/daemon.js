@@ -388,7 +388,22 @@ const ownedSessionIdsFromState = () => {
   }
   return ids;
 };
+// beta.28 — a full scan of ~2000 local sessions takes longer than the 30 s
+// interval on a busy machine (first service sync on 2026-10-16: 110 s), so
+// without this guard ticks overlap and the bridge receives interleaved
+// inventories. One scan in flight at a time; a tick that finds one running
+// is skipped and the next interval picks up.
+let externalScanInFlight = false;
 const externalScanTick = async () => {
+  if (externalScanInFlight) return;
+  externalScanInFlight = true;
+  try {
+    await externalScanTickInner();
+  } finally {
+    externalScanInFlight = false;
+  }
+};
+const externalScanTickInner = async () => {
   try {
     // Phase 6.5 — fold opencode SQLite sessions into the same external sync
     // payload. Both scanners are best-effort and return [] on failure, so a
