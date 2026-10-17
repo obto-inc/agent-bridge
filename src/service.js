@@ -105,7 +105,11 @@ const launchdPlist = ({ workingDir }) => {
     '  <key>RunAtLoad</key>\n  <true/>\n' +
     '  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n' +
     '  <key>ThrottleInterval</key>\n  <integer>30</integer>\n' +
-    '  <key>ProcessType</key>\n  <string>Background</string>\n' +
+    // beta.31 — Standard, not Background: Background throttles CPU and disk
+    // IO for the daemon AND the coding agent it spawns. On 2026-10-17 it made
+    // a cold session scan take 184 s and warm ones up to 40 s, and every turn
+    // the human is waiting on ran at background priority.
+    '  <key>ProcessType</key>\n  <string>Standard</string>\n' +
     '  <key>StandardOutPath</key>\n  <string>' + xmlEscape(LOG_PATH) + '</string>\n' +
     '  <key>StandardErrorPath</key>\n  <string>' + xmlEscape(LOG_PATH) + '</string>\n' +
     '</dict>\n</plist>\n';
