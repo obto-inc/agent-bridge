@@ -17,7 +17,8 @@ const { buildHistoryBlock } = require('./history');
 // "Claude Code native binary not found" even though the version-matched binary
 // IS present (verified: the bundled binary runs, and passing an explicit path
 // works). So we resolve the binary ourselves and pass it via
-// options.pathToClaudeCodeExecutable. Order: CLAUDE_CODE_PATH env -> the SDK's
+// options.pathToClaudeCodeExecutable. Order: CLAUDE_CODE_PATH env -> the user's
+// installed `claude` (PATH, ~/.local/bin, ~/.claude/local) -> the SDK's
 // bundled, version-matched binary (computed from THIS file's real path, so it
 // survives the symlink) -> the user's installed Claude Code (VS Code extension /
 // ~/.claude/local). null lets the SDK attempt its own detection as a last resort.
@@ -25,6 +26,23 @@ const resolveClaudeBinary = () => {
   const tryPath = (p) => { try { return p && fs.existsSync(p) ? p : null; } catch (_) { return null; } };
   const env = tryPath(process.env.CLAUDE_CODE_PATH);
   if (env) return env;
+  // The user's own installed Claude Code comes BEFORE the SDK's bundled copy: it
+  // is the binary the user signs in with (`claude` then /login), and macOS lets
+  // only that binary read its Keychain login. The bundled copy answered every
+  // turn "Not logged in · Please run /login" (witnessed 2026-10-17, bundled
+  // 2.1.138 vs installed 2.1.296).
+  const onPath = (() => {
+    const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+      .concat([path.join(os.homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']);
+    for (const d of dirs) {
+      const p = tryPath(path.join(d, 'claude'));
+      if (p) return p;
+    }
+    return null;
+  })();
+  if (onPath) return onPath;
+  const local0 = tryPath(path.join(os.homedir(), '.claude', 'local', 'claude'));
+  if (local0) return local0;
   const bundled = tryPath(path.join(
     __dirname, '..', 'node_modules', '@anthropic-ai',
     'claude-agent-sdk-' + process.platform + '-' + process.arch, 'claude',
@@ -356,10 +374,20 @@ const buildBootstrapPrompt = (payload) =>
   'replies in this conversation are invisible to the human and effectively dropped.\n\n' +
   'Now respond to the human message above.';
 
+// bridgePosted: the model called bridge_post itself during this turn.
+// finalText: the turn's last assistant text (the SDK result message's `result`
+// when present, else the text of the last assistant message that had any).
+// drive() relays finalText to the thread when the model did not post, so a
+// reply never dies in the local JSONL (a resumed external session is never
+// told about bridge_post — witnessed 2026-10-17: a 33-char answer, nothing
+// on the thread).
 const consumeQuery = async (q) => {
   let assistantTextChars = 0;
   let stopReason = null;
   let observedSessionId = null;
+  let bridgePosted = false;
+  let lastText = '';
+  let resultText = '';
 
   for await (const event of q) {
     if (!event || typeof event !== 'object') continue;
@@ -369,20 +397,28 @@ const consumeQuery = async (q) => {
     }
 
     if (event.type === 'assistant' && event.message && Array.isArray(event.message.content)) {
+      let text = '';
       for (const c of event.message.content) {
         if (c && c.type === 'text' && typeof c.text === 'string') {
           assistantTextChars += c.text.length;
+          text += c.text;
+        }
+        if (c && c.type === 'tool_use' && /(^|__)bridge_post$/.test(String(c.name || ''))) {
+          bridgePosted = true;
         }
       }
+      if (text.trim()) lastText = text;
     }
 
     if (event.type === 'result') {
       stopReason = event.subtype || event.stop_reason || 'done';
+      if (typeof event.result === 'string') resultText = event.result;
       break;
     }
   }
 
-  return { assistantTextChars, stopReason, observedSessionId };
+  const finalText = (resultText.trim() ? resultText : lastText).trim();
+  return { assistantTextChars, stopReason, observedSessionId, bridgePosted, finalText };
 };
 
 const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
@@ -417,7 +453,7 @@ const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
   });
 
   const startedAt = Date.now();
-  const { assistantTextChars, stopReason, observedSessionId } =
+  const { assistantTextChars, stopReason, observedSessionId, bridgePosted, finalText } =
     await consumeQuery(sdk.query({ prompt, options }));
 
   if (!observedSessionId) {
@@ -450,6 +486,8 @@ const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
     stopReason,
     assistantTextChars,
     lastJsonlMtimeMs,
+    bridgePosted,
+    finalText,
   };
 };
 
@@ -487,7 +525,7 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
   });
 
   const startedAt = Date.now();
-  const { assistantTextChars, stopReason } =
+  const { assistantTextChars, stopReason, bridgePosted, finalText } =
     await consumeQuery(sdk.query({ prompt, options }));
 
   const newMtime = statMtimeMs(jsonlPath);
@@ -501,7 +539,7 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
     lastJsonlMtimeMs: newMtime,
   });
 
-  return { stopReason, assistantTextChars, lastJsonlMtimeMs: newMtime };
+  return { stopReason, assistantTextChars, lastJsonlMtimeMs: newMtime, bridgePosted, finalText };
 };
 
 // A turn that errored before producing ANY assistant output never called
@@ -530,6 +568,49 @@ const postBridgeNotice = async ({ threadId, kind, body, log }) => {
       error: e && e.message ? e.message : String(e),
     });
   }
+};
+
+// Post the turn's answer when the model did not call bridge_post itself, and
+// say so when a resume was skipped because the session is open in a terminal.
+// Without this the human sees nothing at all.
+const MAX_RELAY_CHARS = 60000;
+const AUTH_FAILURE_RE = /Not logged in|Please run \/login|OAuth session expired|Failed to authenticate|Invalid API key/i;
+const relayTurn = async (result, params) => {
+  if (!result) return;
+  if (result.skipped) {
+    await postBridgeNotice({
+      threadId: params.threadId,
+      kind: 'status',
+      body: 'This session is open in a terminal on ' + (params.payload && params.payload.agentId ? params.payload.agentId : 'this machine') +
+        ' right now, so the bridge did not resume it (two writers would corrupt it). ' +
+        'Close or finish that terminal session, then send again.',
+      log: params.log,
+    });
+    return;
+  }
+  if (result.bridgePosted || !result.finalText) return;
+  // Claude Code on this machine is signed out (or its login expired). The CLI
+  // prints that as the "answer"; turn it into an instruction the human can act on.
+  if (AUTH_FAILURE_RE.test(result.finalText)) {
+    await postBridgeNotice({
+      threadId: params.threadId,
+      kind: 'error',
+      body: 'Claude Code on ' + (params.payload && params.payload.agentId ? params.payload.agentId : 'this machine') +
+        ' is not signed in, so it could not answer ("' + result.finalText.slice(0, 120) + '"). ' +
+        'On that machine, open a terminal, run `claude`, type `/login`, finish the sign-in, then send your message again.',
+      log: params.log,
+    });
+    params.log('warn', 'claude engine not signed in', { threadId: params.threadId, text: result.finalText.slice(0, 120) });
+    return;
+  }
+  const body = result.finalText.length > MAX_RELAY_CHARS
+    ? result.finalText.slice(0, MAX_RELAY_CHARS) + '\n\n[truncated]'
+    : result.finalText;
+  await postBridgeNotice({ threadId: params.threadId, kind: 'result', body, log: params.log });
+  params.log('info', 'relayed final text (model did not call bridge_post)', {
+    threadId: params.threadId,
+    chars: body.length,
+  });
 };
 
 const drive = (params) => {
@@ -585,8 +666,10 @@ const drive = (params) => {
               log: params.log,
             });
           }
+          await relayTurn(fresh, params);
           return fresh;
         }
+        await relayTurn(result, params);
         return result;
       }
 
@@ -606,6 +689,7 @@ const drive = (params) => {
           log: params.log,
         });
       }
+      await relayTurn(result, params);
       return result;
     })
     .catch(async (err) => {
@@ -632,4 +716,5 @@ module.exports = {
   buildEnvelope,
   buildBootstrapPrompt,
   tryResolvePermission,
+  _internal: { consumeQuery, relayTurn, claudeBin: CLAUDE_BIN },
 };

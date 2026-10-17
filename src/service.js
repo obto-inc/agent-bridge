@@ -79,11 +79,16 @@ const rotateLogIfLarge = (maxBytes) => {
 };
 
 const launchdPlist = ({ workingDir }) => {
+  // USER / LOGNAME: launchd starts agents without them, and Claude Code looks up
+  // its macOS Keychain login by user name. Without them every bridge turn
+  // answers "Not logged in · Please run /login" (witnessed 2026-10-17).
+  const userName = (() => { try { return os.userInfo().username; } catch (_) { return process.env.USER || ''; } })();
   const env = {
     PATH: servicePath(),
     HOME: os.homedir(),
     OBTO_BRIDGE_SERVICE: '1',
   };
+  if (userName) { env.USER = userName; env.LOGNAME = userName; }
   const envXml = Object.keys(env).map((k) =>
     '    <key>' + xmlEscape(k) + '</key>\n    <string>' + xmlEscape(env[k]) + '</string>').join('\n');
   return '<?xml version="1.0" encoding="UTF-8"?>\n' +
@@ -118,6 +123,7 @@ const systemdUnit = ({ workingDir }) => {
     'WorkingDirectory=' + workingDir + '\n' +
     'Environment=PATH=' + servicePath() + '\n' +
     'Environment=OBTO_BRIDGE_SERVICE=1\n' +
+    (process.env.USER ? 'Environment=USER=' + process.env.USER + '\n' + 'Environment=LOGNAME=' + process.env.USER + '\n' : '') +
     'Restart=on-failure\n' +
     'RestartSec=30\n' +
     'StandardOutput=append:' + LOG_PATH + '\n' +

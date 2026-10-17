@@ -1,5 +1,16 @@
 'use strict';
 
+// Services installed before 0.1.0-beta.30 run without USER / LOGNAME (launchd
+// does not set them). Claude Code finds its macOS Keychain login by user name,
+// so fill them in before any engine is spawned.
+(() => {
+  try {
+    const u = require('os').userInfo().username;
+    if (u && !process.env.USER) process.env.USER = u;
+    if (u && !process.env.LOGNAME) process.env.LOGNAME = u;
+  } catch (_) {}
+})();
+
 const { loadConfig } = require('./config');
 const { startStream } = require('./stream-client');
 const { loadState, saveState, getAgentSession, setAgentSession } = require('./state');
