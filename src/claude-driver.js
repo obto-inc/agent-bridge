@@ -421,6 +421,30 @@ const consumeQuery = async (q) => {
   return { assistantTextChars, stopReason, observedSessionId, bridgePosted, finalText };
 };
 
+// beta.33 — the SDK reports EVERY spawn ENOENT as "Claude Code native binary
+// not found", including the one Node raises when the child's cwd does not
+// exist. When the cwd is the missing piece, say that instead (witnessed
+// 2026-10-17: chat fcb87456 resumed in a deleted /private/tmp scratchpad).
+const NATIVE_BINARY_RE = /native binary not found/i;
+const explainSpawnError = (err, cwd) => {
+  const msg = err && err.message ? err.message : String(err);
+  if (!NATIVE_BINARY_RE.test(msg) || !cwd) return err;
+  let exists = false;
+  try { exists = fs.existsSync(cwd); } catch (_) {}
+  if (exists) return err;
+  const e = new Error('working directory missing: ' + cwd);
+  e.cause = err;
+  return e;
+};
+
+const runQuery = async (sdk, prompt, options) => {
+  try {
+    return await consumeQuery(sdk.query({ prompt, options }));
+  } catch (err) {
+    throw explainSpawnError(err, options && options.cwd);
+  }
+};
+
 const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
   const sdk = await import('@anthropic-ai/claude-agent-sdk');
   const bridgeServer = await buildBridgeMcpServer({ log });
@@ -454,7 +478,7 @@ const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
 
   const startedAt = Date.now();
   const { assistantTextChars, stopReason, observedSessionId, bridgePosted, finalText } =
-    await consumeQuery(sdk.query({ prompt, options }));
+    await runQuery(sdk, prompt, options);
 
   if (!observedSessionId) {
     throw new Error('no session_id observed from query() init event');
@@ -547,7 +571,7 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
 
   const startedAt = Date.now();
   const { assistantTextChars, stopReason, observedSessionId, bridgePosted, finalText } =
-    await consumeQuery(sdk.query({ prompt, options }));
+    await runQuery(sdk, prompt, options);
 
   // The SDK keeps the id on a plain resume; take what it reports when it
   // reports one so a fork would still be bound correctly.
@@ -754,5 +778,5 @@ module.exports = {
   buildEnvelope,
   buildBootstrapPrompt,
   tryResolvePermission,
-  _internal: { consumeQuery, relayTurn, claudeBin: CLAUDE_BIN },
+  _internal: { consumeQuery, relayTurn, explainSpawnError, claudeBin: CLAUDE_BIN },
 };

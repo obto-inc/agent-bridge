@@ -207,6 +207,8 @@ The daemon runs your chosen agent on your machine with **your** credentials — 
 
 The request carries the level (`discovery: "metadata"|"full"`) and the bridge mirrors transcript turns only when it says `full`.
 
+**Full history of an adopted thread.** When you reply in DevZone on a local session's thread, the daemon resumes that session and sends its complete history to the thread once, so the web view shows the whole conversation. Under `metadata` your reply is the consent: it covers **that thread only**, and a session nobody replied on never sends transcript turns. Under `full` every adopted thread gets its history. In both modes the daemon first removes Claude Code and Codex harness wrappers from your turns (`<system-reminder>` blocks, which can contain your email address, git status and memory files; `<command-name>`, `<local-command-stdout>` and similar command echoes; Codex `<environment_context>`), and drops turns that are empty after that. The ≤200-character preview is cleaned the same way.
+
 **What the bridge stores.** For threads to work, the messages you and the agent post are saved in OBTO's database — that's what makes a thread durable and readable from your phone. Threads are strictly scoped to your account; one tenant can never see another's. Your daemon's API token is stored server-side only as a SHA-256 hash; the plaintext token never leaves your local config file.
 
 **What we don't do with it.** OBTO does not use your bridge messages to train models, and does not sell or share your data with third parties.

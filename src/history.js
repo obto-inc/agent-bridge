@@ -28,7 +28,7 @@ const path = require('path');
 const os = require('os');
 
 const bridgeHttp = require('./bridge-http');
-const { findSessionFile, extractAllMessages } = require('./external-scanner');
+const { findSessionFile, extractAllMessages, stripHarnessWrappers } = require('./external-scanner');
 const { fullMessagesFor } = require('./opencode-sqlite-scanner');
 
 // ── Full-history backfill ─────────────────────────────────────────────────
@@ -52,23 +52,62 @@ const readFullSessionHistory = (source, sessionId) => {
   }
 };
 
+// beta.33 — what the backfill ships. Harness wrappers (<system-reminder>,
+// <command-name>, <local-command-stdout>, …) are removed from user turns,
+// whatever the source, and turns left empty are dropped. The Claude/Codex
+// parser strips them already; this pass also covers opencode and keeps the
+// rule in one place for the POST.
+const cleanForBackfill = (messages) => {
+  const out = [];
+  for (const m of messages || []) {
+    if (!m) continue;
+    const body = m.role === 'user'
+      ? stripHarnessWrappers(m.body)
+      : String(m.body == null ? '' : m.body).trim();
+    if (!body) continue;
+    out.push(Object.assign({}, m, { body }));
+  }
+  return out;
+};
+
+// beta.33 — consent for full bodies. Under discovery:'metadata' (the default)
+// no transcript leaves the machine on its own. A human reply on a thread in
+// DevZone is consent to mirror THAT thread's session history, and only that
+// thread's: the daemon records it per threadId when the reply arrives
+// (recordReplyConsent), and backfillFullHistory refuses to ship bodies for a
+// thread without it. discovery:'full' has opted in for every thread.
+const replyConsent = new Set();
+const recordReplyConsent = (threadId) => {
+  if (threadId) replyConsent.add(String(threadId));
+};
+const hasReplyConsent = (threadId) => replyConsent.has(String(threadId || ''));
+const mayShipBodies = (threadId, discovery) =>
+  discovery === 'full' || hasReplyConsent(threadId);
+
 // Threads we've already backfilled this daemon lifetime. The server route is
 // idempotent anyway (clientMsgId dedupe), so this is purely a noise guard.
 const backfilledThreads = new Set();
 
 // Fire-and-forget. Reads the full session and ships it to the bridge.
-const backfillFullHistory = ({ threadId, externalAdoption, log }) => {
+const backfillFullHistory = ({ threadId, externalAdoption, discovery, log }) => {
   const ea = externalAdoption || {};
   const sessionId = String(ea.sessionId || '').trim();
   const source = String(ea.source || 'claude');
   if (!threadId || !sessionId) return;
   if (backfilledThreads.has(threadId)) return;
+  const level = discovery === 'full' ? 'full' : 'metadata';
+  if (!mayShipBodies(threadId, level)) {
+    log('info', 'history backfill skipped: discovery is metadata and nobody replied on this thread', {
+      threadId, source, sessionId,
+    });
+    return;
+  }
   backfilledThreads.add(threadId);
 
   // setImmediate keeps file IO + the POST entirely off the reply hot path.
   setImmediate(async () => {
     try {
-      const messages = readFullSessionHistory(source, sessionId);
+      const messages = cleanForBackfill(readFullSessionHistory(source, sessionId));
       // The adopt route already inserted ~10 turns; a full read that isn't
       // meaningfully bigger adds nothing but churn.
       if (!messages || messages.length === 0) {
@@ -81,6 +120,7 @@ const backfillFullHistory = ({ threadId, externalAdoption, log }) => {
           threadId,
           source,
           sessionId,
+          discovery: level,
           sent: messages.length,
           inserted: r.data && r.data.inserted,
           deduped: r.data && r.data.deduped,
@@ -200,4 +240,12 @@ const buildHistoryBlock = async ({ threadId, currentMessageId, engineName, log }
   );
 };
 
-module.exports = { backfillFullHistory, buildHistoryBlock, readFullSessionHistory };
+module.exports = {
+  backfillFullHistory,
+  buildHistoryBlock,
+  readFullSessionHistory,
+  cleanForBackfill,
+  recordReplyConsent,
+  hasReplyConsent,
+  mayShipBodies,
+};

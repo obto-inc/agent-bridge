@@ -23,7 +23,8 @@ const { detect: detectCapabilities } = require('./capabilities');
 // a slow scan never stalls the SSE reader.
 const { scanExternal, stopScanWorker } = require('./scan-host');
 // Phase 6.6 — full-history backfill for adopted threads (fire-and-forget).
-const { backfillFullHistory } = require('./history');
+const { backfillFullHistory, recordReplyConsent } = require('./history');
+const { resolveResumeCwd } = require('./resume-cwd');
 // Phase 6.8 — advertise the daemon's own version to the bridge (SSE connect
 // + every sync heartbeat) so the UI can show what each machine is running.
 const DAEMON_VERSION = (() => {
@@ -195,6 +196,10 @@ const handleEvent = async (sseEvent) => {
     }
   }
 
+  // beta.33 — a human reply on this thread is consent to mirror its local
+  // session history (history.js), for this thread only.
+  if (!payload.role || payload.role === 'human') recordReplyConsent(threadId);
+
   // v1.1 — which agent this thread is bound to (server-set, on the event).
   const agent = agentFor(payload);
   let session = getAgentSession(state, threadId, agent);
@@ -223,8 +228,40 @@ const handleEvent = async (sseEvent) => {
     if (typeof resumeCwd === 'string' && resumeCwd.startsWith('//')) {
       resumeCwd = '/' + resumeCwd.replace(/^\/+/, '');
     }
-    const looksAbsolute = typeof resumeCwd === 'string' && resumeCwd.startsWith('/');
-    if (!looksAbsolute) {
+    let looksAbsolute = typeof resumeCwd === 'string' && resumeCwd.startsWith('/');
+    let cwdMissing = false;
+    // beta.33 — the recorded cwd must still exist. A session's last cwd is
+    // often a scratchpad under /private/tmp that is gone later; the SDK then
+    // fails with a misleading "native binary not found". Re-derive from the
+    // session file's head; if that fails too, first-touch fresh.
+    if (looksAbsolute && !fs.existsSync(resumeCwd)) {
+      const derived = resolveResumeCwd({
+        source: ea.source,
+        projectDir: ea.projectDir,
+        sessionId: ea.sessionId,
+      });
+      if (derived) {
+        log('info', 'external adoption: recorded cwd is missing, using the session file head cwd', {
+          threadId,
+          sessionId: ea.sessionId,
+          missingCwd: resumeCwd,
+          cwd: derived,
+        });
+        resumeCwd = derived;
+      } else {
+        log('warn', 'external adoption skipped: recorded cwd is missing and the session file names no existing cwd — first-touching fresh', {
+          threadId,
+          agent,
+          sessionId: ea.sessionId,
+          missingCwd: resumeCwd,
+        });
+        looksAbsolute = false;
+        cwdMissing = true;
+      }
+    }
+    if (cwdMissing) {
+      // Logged above; the driver first-touches fresh in cfg.projectDir.
+    } else if (!looksAbsolute) {
       // The external adoption record didn't carry a real filesystem path —
       // we will NOT synthesize a binding pointing at the daemon's working
       // dir, since that would silently misroute the agent to unrelated
@@ -260,7 +297,7 @@ const handleEvent = async (sseEvent) => {
     // preview. Runs off the hot path; idempotent server-side. Fired even
     // when the cwd guard above declined the resume binding — history is
     // about what the user SEES, independent of whether we can resume.
-    backfillFullHistory({ threadId, externalAdoption: ea, log });
+    backfillFullHistory({ threadId, externalAdoption: ea, discovery: cfg.discovery, log });
   }
 
   log('event', 'reply received', {

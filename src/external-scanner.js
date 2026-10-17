@@ -154,6 +154,39 @@ const readTailUntilMessages = (filePath) => {
   }
 };
 
+// beta.33 — Claude Code harness wrappers. The CLI and desktop app write
+// these into "user" records: <system-reminder> blocks (which can carry the
+// user's email address, git status, memory files), slash-command echoes and
+// local command output. They are context for the model, not conversation, so
+// they never leave the machine. Each block is removed with its contents; an
+// opening tag with no close (a truncated record) drops everything after it.
+// Only user records are stripped: assistant output is real model text.
+// Witnessed 2026-10-17: the history backfill for chat fcb87456 copied raw
+// <system-reminder> blocks, email included, into the canonical thread.
+const HARNESS_TAGS = [
+  'system-reminder',
+  'command-name', 'command-message', 'command-args', 'command-contents',
+  'local-command-stdout', 'local-command-stderr', 'local-command-caveat',
+  'bash-input', 'bash-stdout', 'bash-stderr',
+  'user-prompt-submit-hook', 'task-notification',
+  'ide_opened_file', 'ide_selection', 'ide_diagnostics',
+  // Codex CLI equivalents.
+  'environment_context', 'user_instructions',
+];
+// Tags count only at the start of a line (the harness writes each block as
+// its own text part), so prose that merely mentions `<system-reminder>`
+// survives.
+const HARNESS_TAG_ALT = HARNESS_TAGS.join('|');
+const HARNESS_BLOCK_RE = new RegExp('(^|\\n)[ \\t]*<(' + HARNESS_TAG_ALT + ')(?:\\s[^>]*)?>[\\s\\S]*?</\\2\\s*>', 'g');
+const HARNESS_OPEN_RE = new RegExp('(^|\\n)[ \\t]*<(?:' + HARNESS_TAG_ALT + ')(?:\\s[^>]*)?>[\\s\\S]*$');
+const stripHarnessWrappers = (text) => {
+  let t = String(text == null ? '' : text);
+  if (t.indexOf('<') === -1) return t;
+  t = t.replace(HARNESS_BLOCK_RE, '$1');
+  t = t.replace(HARNESS_OPEN_RE, '$1');
+  return t.replace(/\n{3,}/g, '\n\n').trim();
+};
+
 // Pull the last N user/assistant *logical turns* from the tail, oldest-first.
 // Phase 6.2.3 — beta.17 fix: Claude Code streams a single assistant reply as
 // MULTIPLE JSONL lines (text → tool_use → tool_result → text → …), each its
@@ -198,8 +231,9 @@ const extractRecentMessages = (jsonlTail, n = RECENT_TURN_COUNT) => {
     // single space was stripping all the formatting before storage. We
     // still collapse runs of horizontal whitespace and excessive blank
     // lines, but real line breaks survive.
+    if (role === 'user') text = stripHarnessWrappers(text);
     text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-    if (!text) continue; // skip pure tool_use / tool_result lines (no text body)
+    if (!text) continue; // skip pure tool_use / tool_result / harness-only lines
     parsed.push({ role, text, ts: obj.timestamp || null });
   }
 
@@ -366,7 +400,7 @@ const extractLastMessage = (jsonlTail) => {
           .map((p) => String(p.text || ''))
           .join('\n');
       }
-      text = text.trim();
+      text = role === 'user' ? stripHarnessWrappers(text) : text.trim();
       if (text) return { author: role === 'user' ? 'user' : 'assistant', preview: text.slice(0, PREVIEW_MAX_CHARS) };
     }
 
@@ -385,7 +419,7 @@ const extractLastMessage = (jsonlTail) => {
           .map((p) => String(p.text || ''))
           .join('\n');
       }
-      text = text.trim();
+      text = role === 'user' ? stripHarnessWrappers(text) : text.trim();
       if (text) return { author: role === 'user' ? 'user' : 'assistant', preview: text.slice(0, PREVIEW_MAX_CHARS) };
     }
   }
@@ -404,6 +438,65 @@ const decodeClaudeProjectDir = (encoded) => {
     return '/' + encoded.slice(1).replace(/-/g, '/');
   }
   return encoded.replace(/-/g, '/');
+};
+
+// Claude names a project dir after its cwd with every non-alphanumeric
+// character replaced by '-' ("/Users/me/a.b_c" -> "-Users-me-a-b-c").
+const encodeClaudeProjectDir = (cwd) => String(cwd || '').replace(/[^a-zA-Z0-9]/g, '-');
+
+const CWD_RE = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+const unquote = (raw) => { try { return JSON.parse('"' + raw + '"'); } catch (_) { return raw; } };
+const firstCwdIn = (text) => {
+  if (!text) return '';
+  CWD_RE.lastIndex = 0;
+  const m = CWD_RE.exec(String(text));
+  return m ? unquote(m[1]) : '';
+};
+const lastCwdIn = (text) => {
+  if (!text) return '';
+  let last = null;
+  for (const m of String(text).matchAll(CWD_RE)) last = m[1];
+  return last == null ? '' : unquote(last);
+};
+
+// The first cwd recorded in a session file: where the session was started.
+// The opening records can be large (a queued prompt with a pasted file), so
+// read forward in chunks until a cwd appears, up to HEAD_CWD_MAX_BYTES.
+const HEAD_CWD_CHUNK = 65536;
+const HEAD_CWD_MAX_BYTES = 1048576;
+const readHeadCwd = (filePath) => {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(HEAD_CWD_CHUNK);
+    let text = '';
+    let pos = 0;
+    while (pos < HEAD_CWD_MAX_BYTES) {
+      const n = fs.readSync(fd, buf, 0, HEAD_CWD_CHUNK, pos);
+      if (n <= 0) break;
+      pos += n;
+      text += buf.toString('utf8', 0, n);
+      const cwd = firstCwdIn(text);
+      if (cwd) return cwd;
+    }
+    return '';
+  } catch (_) {
+    return '';
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} }
+  }
+};
+
+// beta.33 — choose the cwd a Claude session should resume in.
+//   1. the HEAD cwd, when its encoding equals the project dir name (the
+//      session was started there, and Claude filed it there);
+//   2. else the TAIL cwd (the last place the session ran a command);
+//   3. else the head cwd, else the decoded dir name (lossy, display only).
+// Witnessed 2026-10-17: chat fcb87456 (project k8/nodes) ended in a deleted
+// /private/tmp/.../scratchpad, and resuming there failed.
+const pickClaudeCwd = (projectDirName, headCwd, tailCwd) => {
+  if (headCwd && encodeClaudeProjectDir(headCwd) === projectDirName) return headCwd;
+  return tailCwd || headCwd || decodeClaudeProjectDir(projectDirName);
 };
 
 // Discover all Claude Desktop "local-agent-mode" project roots.
@@ -469,27 +562,18 @@ const walkClaudeProjectsRoot = (root) => {
       // session record, so read it from content. Decoding the encoded dir name
       // is LOSSY for any path with dashes (".../obto-inc-agent-bridge" decodes
       // to ".../obto/inc/agent/bridge" — a nonexistent dir, making a resumed
-      // session run in the wrong place). Fall back to the decoded name only
-      // when no cwd is present in the tail.
-      let realCwd = '';
-      let cwdM = tail.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-      if (!cwdM) {
-        // Tail had no cwd (e.g. trailing tool output) — check the head, where
-        // the first turn's envelope records it.
-        try {
-          const fdh = fs.openSync(filePath, 'r');
-          const hb = Buffer.alloc(Math.min(8192, stat.size));
-          fs.readSync(fdh, hb, 0, hb.length, 0);
-          fs.closeSync(fdh);
-          cwdM = hb.toString('utf8').match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-        } catch (_) {}
-      }
-      if (cwdM) { try { realCwd = JSON.parse('"' + cwdM[1] + '"'); } catch (_) { realCwd = cwdM[1]; } }
+      // session run in the wrong place). beta.33: the TAIL cwd is wherever the
+      // session last ran a command (often a scratchpad under /private/tmp that
+      // is deleted later), so the HEAD cwd wins when it matches the project
+      // dir name. See pickClaudeCwd.
+      const tailCwd = lastCwdIn(tail);
+      const headCwd = readHeadCwd(filePath);
+      const realCwd = pickClaudeCwd(entry, headCwd, tailCwd);
       out.push(memoPut(filePath, stat, {
         source: 'claude',
         sessionId,
         projectDir: entry,
-        projectName: realCwd || decodeClaudeProjectDir(entry),
+        projectName: realCwd,
         title: title,
         recentMessages: recentMessages,
         lastActivityAt: stat.mtimeMs,
@@ -704,8 +788,14 @@ module.exports = {
   scanAll,
   scanClaude,
   scanCodex,
+  walkClaudeProjectsRoot,
   extractLastMessage,
+  extractRecentMessages,
+  stripHarnessWrappers,
   decodeClaudeProjectDir,
+  encodeClaudeProjectDir,
+  pickClaudeCwd,
+  readHeadCwd,
   findSessionFile,
   extractAllMessages,
 };
