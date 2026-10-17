@@ -14,6 +14,10 @@
 // unreachable, (3) fail FAST and LOUD on 401/402/403 instead of retrying
 // forever with a dead token, (4) `obto-bridge install-service` supervises.
 
+// beta.31 — the bridge writes ': hb' every 25 s. A socket that delivers
+// nothing for this long is half-open (sleep/wake, NAT drop, the 10-17
+// ETIMEDOUT case): abort and reconnect instead of waiting for the OS.
+const IDLE_TIMEOUT_MS = 75000;
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60000;
 const FATAL_STATUSES = [401, 402, 403];
@@ -83,6 +87,7 @@ const connectOnce = async ({ url, headers, onEvent, onError, log }) => {
   }
 
   if (log) log('info', 'sse stream connected', { status: res.status });
+  ac.lastByteAt = Date.now();
 
   // Read the body as a stream of UTF-8 chunks; split on blank lines (frame
   // delimiter per SSE spec). Pump until end-of-stream or abort.
@@ -94,6 +99,7 @@ const connectOnce = async ({ url, headers, onEvent, onError, log }) => {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+        ac.lastByteAt = Date.now();
         buf += decoder.decode(value, { stream: true });
 
         // Split on \n\n (or \r\n\r\n) — SSE frame delimiter.
@@ -189,6 +195,13 @@ const startStream = ({ url, getHeaders, headers, onEvent, onStatus, onFatal, log
         // connectOnce for "stream closed" so we busy-poll the AbortController.
         while (!stopped && currentAc && !currentAc.signal.aborted) {
           await new Promise((r) => setTimeout(r, 500));
+          if (currentAc && !currentAc.signal.aborted &&
+              Date.now() - (currentAc.lastByteAt || 0) > IDLE_TIMEOUT_MS) {
+            const idleMs = Date.now() - currentAc.lastByteAt;
+            if (log) log('warn', 'sse stream idle — reconnecting', { idleMs });
+            status({ state: 'lost', error: 'idle ' + idleMs + ' ms', at: new Date().toISOString() });
+            try { currentAc.abort(); } catch (_) {}
+          }
         }
       } catch (err) {
         const errText = describeError(err);
@@ -222,4 +235,4 @@ const startStream = ({ url, getHeaders, headers, onEvent, onStatus, onFatal, log
   };
 };
 
-module.exports = { startStream, parseSseFrame, describeError, FATAL_STATUSES };
+module.exports = { startStream, parseSseFrame, describeError, FATAL_STATUSES, IDLE_TIMEOUT_MS };
