@@ -8,11 +8,11 @@ You post a message on a thread from your phone or laptop. The daemon (running on
 
 ```bash
 npm install -g @obtoai/agent-bridge
-obto-bridge init --link LNK-XXXX-XXXX-XXXX-XXXX   # code from app.obto.co → account home → Agent Bridge → Enable
-obto-bridge install-service                       # daemon runs in the background, starts at login
+obto-bridge init              # opens the browser: sign in to OBTO, approve this machine
+obto-bridge install-service   # daemon runs in the background, starts at login
 ```
 
-No OBTO login yet? `obto-bridge init` still creates a bridge-only account inline — see [Setup](#setup).
+No OBTO login yet? `obto-bridge init --register` creates a bridge-only account inline — see [Setup](#setup).
 
 ## Status
 
@@ -50,6 +50,20 @@ npx @obtoai/agent-bridge <command>
 
 ### Linked to your OBTO login (recommended)
 
+**Browser sign-in (default).** On the machine:
+
+```bash
+npx @obtoai/agent-bridge@latest init        # same as: obto-bridge login
+```
+
+It prints a link and a code like `ABCD-EFGH` and opens your browser at `https://app.obto.co/api/bridge/device?user_code=ABCD-EFGH`. Sign in to OBTO there, check that the page shows the same code and machine name, and click **Approve**. The terminal finishes on its own and saves `{accountId, apiToken, tenant}` to `~/.obto-bridge/config.json` (mode 0600), exactly as `--link` does. Approving also turns on Agent Bridge for your login if it was off. The code expires after 10 minutes; **Deny** discards the request. Your OBTO login token never leaves the browser — the machine only receives its own bridge token.
+
+On an SSH session, or with `--no-browser`, nothing is opened: open the printed link on any device where you are signed in to OBTO. Approve only a code you just saw in your own terminal — anyone who gets you to approve their code gets a bridge token for your login.
+
+Same optional flags as below (`--agent-id`, `--project-dir`, `--discovery`). Like `--link`, signing in rotates the account token: other machines on the same account are signed out until they sign in again.
+
+**One-time link code (alternative).**
+
 1. Sign in at `https://app.obto.co`, open your account home and click **Enable Bridge** (or **Add another machine** if the module is already on). You get a one-time code `LNK-XXXX-XXXX-XXXX-XXXX` — single use, expires in ~15 minutes.
 2. On the machine:
 
@@ -74,15 +88,15 @@ Within a minute your account home card shows the machine online and every local 
 ### Bridge-only account (no OBTO login)
 
 ```bash
-obto-bridge init
+obto-bridge init --register
 ```
 
-`init` asks for one thing — your email. Username is derived from the email's local part (`divyansh.verma@gmail.com` → `divyansh-verma`); password is auto-generated as a strong 12-char string and **shown once** in stdout for you to save. It then creates the account inline via `POST /api/bridge/register`, saves the returned API token to `~/.obto-bridge/config.json` (mode 0600), and asks for an agent name (so multiple machines on the same account don't collide), the project directory the daemon should work in, a *fallback* agent (`claude` / `codex` / `opencode` — used only for legacy events without an explicit agent), and whether to relay tool-permission requests via the bridge. Sign in at `https://agent-bridge.obto.co/api/view` as `@username` with the generated password to start a thread.
+`init --register` asks for one thing — your email. Username is derived from the email's local part (`divyansh.verma@gmail.com` → `divyansh-verma`); password is auto-generated as a strong 12-char string and **shown once** in stdout for you to save. It then creates the account inline via `POST /api/bridge/register`, saves the returned API token to `~/.obto-bridge/config.json` (mode 0600), and asks for an agent name (so multiple machines on the same account don't collide), the project directory the daemon should work in, a *fallback* agent (`claude` / `codex` / `opencode` — used only for legacy events without an explicit agent), and whether to relay tool-permission requests via the bridge. Sign in at `https://agent-bridge.obto.co/api/view` as `@username` with the generated password to start a thread.
 
 Overrides:
 
-- `obto-bridge init --username <name>` — pick your own username instead of the derived one.
-- `obto-bridge init --password <pwd>` — set your own password instead of auto-generating.
+- `obto-bridge init --register --username <name>` — pick your own username instead of the derived one.
+- `obto-bridge init --register --password <pwd>` — set your own password instead of auto-generating.
 - `obto-bridge init --token obto_xxxxxxxx --account acc_xxxxxxxx` — skip registration entirely (paste-in for existing users or scripted/headless setups).
 - `obto-bridge init --agent-id <name> --project-dir <path> --discovery metadata|full` — answer those prompts from the command line.
 
@@ -115,7 +129,7 @@ obto-bridge install-service
 - **macOS:** writes `~/Library/LaunchAgents/com.obto.agent-bridge.plist` and loads it (`RunAtLoad`, `KeepAlive` on crash only, 30 s throttle). The PATH baked into the plist is your current shell PATH plus the directory of the `node` that ran the command, so nvm installs and `claude`/`codex`/`opencode` resolve.
 - **Linux:** writes `~/.config/systemd/user/obto-bridge.service` (`Restart=on-failure`, `RestartSec=30`) and runs `systemctl --user enable --now`. For a box you are not logged in to, also run `loginctl enable-linger $USER`.
 - Logs go to `~/.obto-bridge/daemon.log` (a log over 10 MB is rotated to `daemon.log.1` once at install time).
-- Re-run `install-service` after `init --link` to pick up a new token; `obto-bridge uninstall-service` removes the unit (config and logs stay).
+- Re-run `install-service` after `init` / `init --link` to pick up a new token; `obto-bridge uninstall-service` removes the unit (config and logs stay).
 
 **Reconnects and failures.** The SSE stream reconnects with capped exponential backoff (1 s → 60 s, jittered). While the bridge is unreachable the log prints one `cannot reach the bridge for N min` line per minute, with the real network error (`ENOTFOUND`, `ECONNREFUSED`, …) instead of a bare `fetch failed`, and `obto-bridge status` shows `reconnecting`. A **401** (token revoked by *Disable Bridge*, a rotation, or another machine re-linking), **402** (no plan) or **403** (suspended) is final: the daemon prints the fix, records it for `status`, and exits *without* being restarted by the service — retrying a dead token every 30 s helps nobody. Re-link and run `install-service` again.
 

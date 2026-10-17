@@ -3,6 +3,7 @@
 
 const subcommands = {
   init:                '../cli/init',
+  login:               '../cli/init',
   start:               '../cli/start',
   status:              '../cli/status',
   whoami:              '../cli/whoami',
@@ -16,9 +17,11 @@ const usage = () => {
   console.error('Usage: obto-bridge <command>');
   console.error('');
   console.error('Commands:');
-  console.error('  init --link <LNK-…>   Link this machine to your OBTO login (code from app.obto.co →');
-  console.error('                        account home → Agent Bridge). Writes ~/.obto-bridge/config.json.');
-  console.error('  init                  Bridge-only account (email) or paste a token via --token/--account.');
+  console.error('  init                  Sign this machine in with your OBTO login: opens the browser,');
+  console.error('                        you approve the machine, writes ~/.obto-bridge/config.json.');
+  console.error('                        Same as `login`. --no-browser prints the link only (SSH).');
+  console.error('  init --link <LNK-…>   Link with a one-time code (app.obto.co → account home → Agent Bridge).');
+  console.error('  init --register       Bridge-only account (email), or paste a token via --token/--account.');
   console.error('  install-service       Run the daemon in the background, start at login (launchd / systemd).');
   console.error('  uninstall-service     Stop the background daemon and remove the unit.');
   console.error('  start                 Run the daemon (foreground).');

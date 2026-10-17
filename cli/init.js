@@ -11,9 +11,15 @@
 //                          no email, no password, no prompts. Exchange endpoint:
 //                          POST https://app.obto.co/api/bridge/link/exchange.
 //   2. --token + --account Paste an existing token (scripted / headless).
-//   3. Existing config     Reuse ~/.obto-bridge/config.json credentials.
-//   4. Self-serve register Email → /api/bridge/register (legacy bridge-only
-//                          account, not linked to an OBTO login).
+//   3. --register          Email → /api/bridge/register (legacy bridge-only
+//                          account, not linked to an OBTO login). Also used when
+//                          an existing config is found and --reuse is passed.
+//   4. (default)           Device sign-in (One Thread OT-7c, RFC 8628 shape):
+//                          POST /api/bridge/device/start → open the browser at
+//                          https://app.obto.co/api/bridge/device?user_code=…, the
+//                          user signs in to OBTO and approves the machine, the CLI
+//                          polls POST /api/bridge/device/token and stores the same
+//                          credential --link would. `obto-bridge login` = this path.
 //
 // Other flags:
 //   --username <name>      (register) Use this instead of the derived username.
@@ -23,6 +29,11 @@
 //   --discovery <level>    'metadata' (default) | 'full' — what the local
 //                          session scanner sends to the bridge. See README.
 //   --link-url <url>       Override the exchange endpoint (self-hosted).
+//   --device-url <url>     Override the device sign-in base (default
+//                          https://app.obto.co/api/bridge/device).
+//   --no-browser           Device sign-in: print the URL, do not open a browser.
+//   --reuse                Keep the credentials already in config.json (old
+//                          interactive setup) instead of signing in again.
 
 const fs = require('fs');
 const path = require('path');
@@ -37,6 +48,7 @@ const DEFAULTS = {
   baseUrl: 'https://agent-bridge.obto.co',
   originHost: 'agent-bridge.obto.co',
   linkUrl: 'https://app.obto.co/api/bridge/link/exchange',
+  deviceUrl: 'https://app.obto.co/api/bridge/device',
   relayPermissions: true,
   discovery: 'metadata',
 };
@@ -58,6 +70,8 @@ const cliLinkUrl = flagValue('--link-url');
 const cliAgentId = flagValue('--agent-id');
 const cliProjectDir = flagValue('--project-dir');
 const cliDiscovery = flagValue('--discovery');
+const cliDeviceUrl = flagValue('--device-url');
+const hasFlag = (name) => argv.indexOf(name) !== -1;
 
 const loadExisting = () => {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
@@ -171,20 +185,12 @@ const LINK_FIX =
   '  Issue a fresh code: app.obto.co → account home → Agent Bridge → "Add another machine",\n' +
   '  then run:  npx @obtoai/agent-bridge@latest init --link <LNK-…>';
 
-// ─── Path 1: --link <code> (non-interactive) ──────────────────────────────
-const linkMain = async () => {
-  const existing = loadExisting();
-  const baseUrl    = process.env.BRIDGE_BASE_URL    || existing.baseUrl    || DEFAULTS.baseUrl;
-  const originHost = process.env.BRIDGE_ORIGIN_HOST || existing.originHost || DEFAULTS.originHost;
-  const linkUrl    = cliLinkUrl || process.env.BRIDGE_LINK_URL || existing.linkUrl || DEFAULTS.linkUrl;
+const DEVICE_FIX =
+  '  Run `npx @obtoai/agent-bridge@latest init` again for a new sign-in code.';
 
-  const code = String(cliLink).trim().toUpperCase();
-  if (!/^LNK(-[A-Z0-9]{4}){4}$/.test(code)) {
-    console.error('error: a link code looks like LNK-XXXX-XXXX-XXXX-XXXX (got "' + cliLink + '").');
-    console.error(LINK_FIX);
-    process.exit(1);
-  }
-
+// Machine settings shared by the --link and device paths. Exits on a bad
+// --discovery value.
+const machineContext = (existing) => {
   const agentId = cliAgentId || process.env.AGENT_ID || existing.agentId ||
     os.hostname().split('.')[0] || 'unnamed-agent';
   const projectDir = path.resolve(
@@ -196,25 +202,123 @@ const linkMain = async () => {
   const relayPermissions = existing.relayPermissions !== undefined
     ? !!existing.relayPermissions
     : DEFAULTS.relayPermissions;
+  if (cliDiscovery && normalizeDiscovery(cliDiscovery, null) === null) {
+    console.error('error: --discovery must be one of: ' + DISCOVERY_LEVELS.join(', '));
+    process.exit(1);
+  }
   const discovery = normalizeDiscovery(
     cliDiscovery || process.env.BRIDGE_DISCOVERY,
     normalizeDiscovery(existing.discovery, DEFAULTS.discovery),
   );
-  if (cliDiscovery && normalizeDiscovery(cliDiscovery, null) === null) {
-    console.error('error: --discovery must be one of: ' + DISCOVERY_LEVELS.join(', '));
+  return {
+    baseUrl:    process.env.BRIDGE_BASE_URL    || existing.baseUrl    || DEFAULTS.baseUrl,
+    originHost: process.env.BRIDGE_ORIGIN_HOST || existing.originHost || DEFAULTS.originHost,
+    linkUrl:    cliLinkUrl || process.env.BRIDGE_LINK_URL || existing.linkUrl || DEFAULTS.linkUrl,
+    agentId,
+    projectDir,
+    agent,
+    relayPermissions,
+    discovery,
+  };
+};
+
+// Store a credential returned by link/exchange or device/token (same body),
+// print what it linked to, verify it against the bridge. `fix` = what to run
+// when the response is unusable.
+const saveLinked = async (d, ctx, existing, fix, extra) => {
+  if (!/^acc_[a-z0-9]+$/i.test(d.accountId || '') || !/^obto_[a-z0-9]+$/i.test(d.apiToken || '')) {
+    console.error('error: unexpected credential shape in the server response. Not saving.');
+    console.error(fix);
+    process.exit(3);
+  }
+
+  const cfg = Object.assign({}, existing, {
+    baseUrl: ctx.baseUrl,
+    originHost: ctx.originHost,
+    linkUrl: ctx.linkUrl,
+    accountId: d.accountId,
+    apiToken: d.apiToken,
+    agentId: ctx.agentId,
+    agent: ctx.agent,
+    projectDir: ctx.projectDir,
+    relayPermissions: ctx.relayPermissions,
+    discovery: ctx.discovery,
+    tenant: d.tenant || null,
+    linkedAt: new Date().toISOString(),
+  }, extra || {});
+
+  try {
+    writeConfig(cfg, existing);
+  } catch (err) {
+    console.error('error: failed to write config: ' + (err && err.message ? err.message : err));
+    process.exit(1);
+  }
+
+  const t = d.tenant || {};
+  const how = d.created ? 'new bridge account' : (d.adopted ? 'adopted your existing bridge account' : 'token rotated');
+  console.log('');
+  if (t.obtoDomain) {
+    console.log('✓ linked to ' + t.obtoDomain + ' as ' + (t.obtoUserName || t.obtoUserId || '?') + '  (' + how + ')');
+  } else {
+    console.log('✓ linked  (' + how + '; the server returned no tenant — account ' + d.accountId + ')');
+  }
+  console.log('  Account:   ' + d.accountId);
+  console.log('  Machine:   ' + ctx.agentId);
+  console.log('  Project:   ' + ctx.projectDir);
+  console.log('  Discovery: ' + ctx.discovery + (ctx.discovery === 'metadata'
+    ? '  (titles, paths, timestamps, ≤200-char preview; no transcript turns)'
+    : '  (recent turns of every local session are sent to the bridge)'));
+  console.log('  Config:    ' + CONFIG_PATH);
+  if (d.rotated) {
+    console.log('  Note: any other machine still using the previous token is now signed out;');
+    console.log('        sign it in again with `obto-bridge init` on that machine.');
+  }
+
+  // Verify the new token against the bridge. Non-fatal on network failure.
+  let result;
+  try {
+    result = await validateAgainstServer(cfg);
+  } catch (err) {
+    console.warn('  ⚠ could not reach ' + ctx.baseUrl + ' to verify: ' + (err && err.message ? err.message : err));
+    console.warn('    Config is saved; run `obto-bridge whoami` once you have a network.');
+  }
+  if (result) {
+    if (result.ok && result.parsed && result.parsed.account) {
+      console.log('  ✓ token verified against ' + ctx.baseUrl);
+    } else {
+      console.warn('  ⚠ token verification returned HTTP ' + result.status +
+        (result.parsed && result.parsed.error ? ' ' + result.parsed.error : '') +
+        ' — run `obto-bridge whoami` to retry.');
+    }
+  }
+
+  console.log('');
+  console.log('Next:  obto-bridge install-service     # run the daemon in the background, start at login');
+  console.log('  or:  obto-bridge start               # foreground');
+};
+
+// ─── Path 1: --link <code> (non-interactive) ──────────────────────────────
+const linkMain = async () => {
+  const existing = loadExisting();
+  const ctx = machineContext(existing);
+
+  const code = String(cliLink).trim().toUpperCase();
+  if (!/^LNK(-[A-Z0-9]{4}){4}$/.test(code)) {
+    console.error('error: a link code looks like LNK-XXXX-XXXX-XXXX-XXXX (got "' + cliLink + '").');
+    console.error(LINK_FIX);
     process.exit(1);
   }
 
   console.log('OBTO Agent Bridge — link this machine');
   console.log('-------------------------------------');
-  console.log('Exchanging link code ' + code.slice(0, 8) + '… at ' + linkUrl + ' (machine "' + agentId + '") ...');
+  console.log('Exchanging link code ' + code.slice(0, 8) + '… at ' + ctx.linkUrl + ' (machine "' + ctx.agentId + '") ...');
 
   let r;
   try {
-    r = await exchangeLinkCode({ linkUrl, code, agentId });
+    r = await exchangeLinkCode({ linkUrl: ctx.linkUrl, code, agentId: ctx.agentId });
   } catch (e) {
     const cause = e && e.cause && (e.cause.code || e.cause.message);
-    console.error('error: cannot reach ' + linkUrl + ': ' + (e && e.message ? e.message : e) +
+    console.error('error: cannot reach ' + ctx.linkUrl + ': ' + (e && e.message ? e.message : e) +
       (cause ? ' (' + cause + ')' : ''));
     console.error('  Check your network, then retry. The code stays valid until it expires (~15 min).');
     process.exit(2);
@@ -236,78 +340,158 @@ const linkMain = async () => {
     process.exit(3);
   }
 
-  const d = r.data;
-  if (!/^acc_[a-z0-9]+$/i.test(d.accountId) || !/^obto_[a-z0-9]+$/i.test(d.apiToken)) {
-    console.error('error: unexpected credential shape in the exchange response. Not saving.');
+  await saveLinked(r.data, ctx, existing, LINK_FIX);
+};
+
+// ─── Path 4 (default): device sign-in in the browser (One Thread OT-7c) ───
+const postJson = async (url, body) => {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    cache: 'no-store',
+    redirect: 'manual',
+  });
+  const text = await res.text();
+  return { status: res.status, ok: res.ok, data: parseJsonLoose(text) };
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Best effort. Never on an SSH session or a Linux box without a display: the
+// user opens the printed URL on whatever device they are signed in on.
+const openBrowser = (url) => {
+  if (hasFlag('--no-browser') || process.env.SSH_CONNECTION || process.env.SSH_TTY) return false;
+  const { spawn } = require('child_process');
+  let cmd;
+  let args;
+  if (process.platform === 'darwin') { cmd = 'open'; args = [url]; }
+  else if (process.platform === 'win32') { cmd = 'cmd'; args = ['/c', 'start', '""', url]; }
+  else {
+    if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return false;
+    cmd = 'xdg-open'; args = [url];
+  }
+  try {
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
+
+const deviceMain = async () => {
+  const existing = loadExisting();
+  const ctx = machineContext(existing);
+  const deviceUrl = String(cliDeviceUrl || process.env.BRIDGE_DEVICE_URL || existing.deviceUrl || DEFAULTS.deviceUrl)
+    .replace(/\/+$/, '');
+  let clientVersion = null;
+  try { clientVersion = require('../package.json').version; } catch (_) {}
+
+  console.log('OBTO Agent Bridge — sign in this machine');
+  console.log('----------------------------------------');
+  if (existing.accountId && existing.apiToken) {
+    const t = existing.tenant || {};
+    console.log('This machine already has credentials' +
+      (t.obtoDomain ? ' (linked to ' + t.obtoDomain + ' as ' + (t.obtoUserName || '?') + ')' : '') +
+      '. Signing in again replaces them.');
+    console.log('(Keep them instead: `obto-bridge init --reuse`.)');
+    console.log('');
+  }
+
+  let start;
+  try {
+    start = await postJson(deviceUrl + '/start', {
+      agentId: ctx.agentId,
+      hostname: os.hostname(),
+      platform: os.platform() + ' ' + os.arch(),
+      clientVersion,
+    });
+  } catch (e) {
+    const cause = e && e.cause && (e.cause.code || e.cause.message);
+    console.error('error: cannot reach ' + deviceUrl + '/start: ' + (e && e.message ? e.message : e) +
+      (cause ? ' (' + cause + ')' : ''));
+    console.error('  Check your network, then retry. Or link with a code: ' +
+      'npx @obtoai/agent-bridge@latest init --link <LNK-…>');
+    process.exit(2);
+  }
+  const s = start.data || {};
+  if (!start.ok || !s.ok || !s.device_code || !s.user_code) {
+    const msg = s.error || s._rawBody || ('HTTP ' + start.status);
+    console.error('error: device sign-in could not start: ' + String(msg).slice(0, 300));
+    if (start.status === 404) {
+      console.error('  This OBTO server has no device sign-in yet. Use a link code instead:');
+      console.error(LINK_FIX);
+    }
     process.exit(3);
   }
 
-  const cfg = Object.assign({}, existing, {
-    baseUrl,
-    originHost,
-    linkUrl,
-    accountId: d.accountId,
-    apiToken: d.apiToken,
-    agentId,
-    agent,
-    projectDir,
-    relayPermissions,
-    discovery,
-    tenant: d.tenant || null,
-    linkedAt: new Date().toISOString(),
-  });
-
-  try {
-    writeConfig(cfg, existing);
-  } catch (err) {
-    console.error('error: failed to write config: ' + (err && err.message ? err.message : err));
-    process.exit(1);
-  }
-
-  const t = d.tenant || {};
-  const how = d.created ? 'new bridge account' : (d.adopted ? 'adopted your existing bridge account' : 'token rotated');
+  const url = s.verification_uri_complete || s.verification_uri;
+  console.log('Sign in to OBTO in your browser and approve this machine:');
   console.log('');
-  if (t.obtoDomain) {
-    console.log('✓ linked to ' + t.obtoDomain + ' as ' + (t.obtoUserName || t.obtoUserId || '?') + '  (' + how + ')');
-  } else {
-    console.log('✓ linked  (' + how + '; the server returned no tenant — account ' + d.accountId + ')');
-  }
-  console.log('  Account:   ' + d.accountId);
-  console.log('  Machine:   ' + agentId);
-  console.log('  Project:   ' + projectDir);
-  console.log('  Discovery: ' + discovery + (discovery === 'metadata'
-    ? '  (titles, paths, timestamps, ≤200-char preview; no transcript turns)'
-    : '  (recent turns of every local session are sent to the bridge)'));
-  console.log('  Config:    ' + CONFIG_PATH);
-  if (d.rotated) {
-    console.log('  Note: any other machine still using the previous token is now signed out;');
-    console.log('        re-link it with its own code from "Add another machine".');
-  }
+  console.log('    ' + url);
+  console.log('');
+  console.log('  Code:    ' + s.user_code + '   (the page must show this exact code)');
+  console.log('  Machine: ' + ctx.agentId);
+  const opened = openBrowser(url);
+  console.log(opened
+    ? '  Opened your browser. If it did not open, copy the link above.'
+    : '  Open the link above on any device where you can sign in to OBTO.');
+  console.log('');
+  process.stdout.write('Waiting for approval');
 
-  // Verify the new token against the bridge. Non-fatal on network failure.
-  let result;
-  try {
-    result = await validateAgainstServer(cfg);
-  } catch (err) {
-    console.warn('  ⚠ could not reach ' + baseUrl + ' to verify: ' + (err && err.message ? err.message : err));
-    console.warn('    Config is saved; run `obto-bridge whoami` once you have a network.');
-  }
-  if (result) {
-    if (result.ok && result.parsed && result.parsed.account) {
-      console.log('  ✓ token verified against ' + baseUrl);
-    } else {
-      console.warn('  ⚠ token verification returned HTTP ' + result.status +
-        (result.parsed && result.parsed.error ? ' ' + result.parsed.error : '') +
-        ' — run `obto-bridge whoami` to retry.');
+  let interval = Math.max(1, parseInt(s.interval, 10) || 5) * 1000;
+  const deadline = Date.now() + Math.max(60, parseInt(s.expires_in, 10) || 600) * 1000;
+  let netFailures = 0;
+  for (;;) {
+    await sleep(interval);
+    if (Date.now() > deadline) {
+      process.stdout.write('\n');
+      console.error('error: the sign-in code expired before it was approved.');
+      console.error(DEVICE_FIX);
+      process.exit(3);
     }
+    let r;
+    try {
+      r = await postJson(deviceUrl + '/token', { device_code: s.device_code });
+      netFailures = 0;
+    } catch (e) {
+      netFailures++;
+      if (netFailures === 1 || netFailures % 6 === 0) {
+        process.stdout.write('\n  (cannot reach ' + deviceUrl + ' — retrying)');
+      }
+      continue;
+    }
+    const d = r.data || {};
+    if (r.ok && d.ok && d.apiToken) {
+      process.stdout.write(' approved.\n');
+      return saveLinked(d, ctx, existing, DEVICE_FIX, { deviceUrl });
+    }
+    const err = d.error || ('HTTP ' + r.status);
+    if (err === 'authorization_pending') { process.stdout.write('.'); continue; }
+    if (err === 'slow_down') { interval += 5000; continue; }
+    process.stdout.write('\n');
+    if (err === 'access_denied') {
+      console.error('error: the request was denied in the browser. Nothing was saved.');
+      process.exit(3);
+    }
+    if (err === 'expired_token' || err === 'invalid_grant') {
+      console.error('error: the sign-in code expired or was already used (' + err + ').');
+      console.error(DEVICE_FIX);
+      process.exit(3);
+    }
+    if (r.status === 403 || err === 'account_suspended') {
+      console.error('error: the bridge account for this login is suspended (HTTP 403). Email support@obto.co.');
+      process.exit(3);
+    }
+    console.error('error: device sign-in failed: ' + String(err).slice(0, 300));
+    console.error(DEVICE_FIX);
+    process.exit(3);
   }
-
-  console.log('');
-  console.log('Next:  obto-bridge install-service     # run the daemon in the background, start at login');
-  console.log('  or:  obto-bridge start               # foreground');
 };
 
-// ─── Paths 2–4: paste-in / existing / self-serve register ─────────────────
+// ─── Paths 2–3: paste-in / existing (--reuse) / self-serve register ───────
 const main = async () => {
   if (cliLink !== null || argv.indexOf('--link') !== -1) {
     if (!cliLink) {
@@ -316,6 +500,10 @@ const main = async () => {
       process.exit(1);
     }
     return linkMain();
+  }
+  const pasteIn = !!(cliToken || cliAccount);
+  if (!pasteIn && !hasFlag('--register') && !hasFlag('--reuse')) {
+    return deviceMain();
   }
 
   console.log('OBTO Agent Bridge — setup');
@@ -350,12 +538,12 @@ const main = async () => {
     if (existing.tenant && existing.tenant.obtoDomain) {
       console.log('  Linked:  ' + existing.tenant.obtoDomain + ' as ' + (existing.tenant.obtoUserName || '?'));
     }
-    console.log('Reusing those credentials. To link this machine to your OBTO login instead, run');
-    console.log('`obto-bridge init --link <LNK-…>` with a code from app.obto.co → account home → Agent Bridge.');
+    console.log('Reusing those credentials. To sign this machine in with your OBTO login instead,');
+    console.log('run `obto-bridge init` (browser sign-in) or `obto-bridge init --link <LNK-…>`.');
     console.log('');
   } else {
-    console.log('Have an OBTO login? Stop here and run `obto-bridge init --link <LNK-…>` instead');
-    console.log('(code from app.obto.co → account home → Agent Bridge → Enable). Otherwise:');
+    console.log('Have an OBTO login? Stop here and run `obto-bridge init` (browser sign-in) instead.');
+    console.log('Otherwise:');
     console.log('');
     console.log('Create a free bridge-only account (no card needed):');
     const email = await ask(rl, '  Email', '');
