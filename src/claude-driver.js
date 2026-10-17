@@ -491,7 +491,28 @@ const driveFirstTouch = async ({ threadId, projectDir, payload, log }) => {
   };
 };
 
+// beta.31 — an adopted external session arrives with jsonlPath:null (the
+// adoption payload names only sessionId + cwd). Locate the real file so the
+// binding the daemon persists after this turn carries it, and the live-session
+// guard has something to stat on the next turn. Claude's own dir encoding
+// replaces more characters than encodeProjectDir does (dots, underscores), so
+// fall back to the same root walk the discovery scanner uses.
+const resolveSessionJsonl = (sessionId, projectDir) => {
+  if (!sessionId) return null;
+  if (projectDir) {
+    const guess = path.join(os.homedir(), '.claude', 'projects',
+      encodeProjectDir(projectDir), sessionId + '.jsonl');
+    if (statMtimeMs(guess) != null) return guess;
+  }
+  try {
+    return require('./external-scanner').findSessionFile('claude', sessionId);
+  } catch (_) {
+    return null;
+  }
+};
+
 const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJsonlMtimeMs, payload, log }) => {
+  if (!jsonlPath) jsonlPath = resolveSessionJsonl(sessionId, projectDir);
   if (isStaleVsBaseline(jsonlPath, lastJsonlMtimeMs)) {
     const cur = statMtimeMs(jsonlPath);
     log('warn', 'JSONL changed since last daemon drive — likely live interactive session, skipping resume', {
@@ -525,9 +546,13 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
   });
 
   const startedAt = Date.now();
-  const { assistantTextChars, stopReason, bridgePosted, finalText } =
+  const { assistantTextChars, stopReason, observedSessionId, bridgePosted, finalText } =
     await consumeQuery(sdk.query({ prompt, options }));
 
+  // The SDK keeps the id on a plain resume; take what it reports when it
+  // reports one so a fork would still be bound correctly.
+  const boundSessionId = observedSessionId || sessionId;
+  if (boundSessionId !== sessionId) jsonlPath = resolveSessionJsonl(boundSessionId, projectDir);
   const newMtime = statMtimeMs(jsonlPath);
 
   log('info', 'resume done', {
@@ -537,9 +562,22 @@ const driveResume = async ({ threadId, sessionId, projectDir, jsonlPath, lastJso
     assistantTextChars,
     durationMs: Date.now() - startedAt,
     lastJsonlMtimeMs: newMtime,
+    jsonlPath,
   });
 
-  return { stopReason, assistantTextChars, lastJsonlMtimeMs: newMtime, bridgePosted, finalText };
+  // sessionId/projectDir/jsonlPath let daemon.js persist the binding (it only
+  // writes state.json when the result names a session). Without them an
+  // adopted thread re-adopted, and re-ran the history backfill, on every turn.
+  return {
+    sessionId: boundSessionId,
+    projectDir,
+    jsonlPath,
+    stopReason,
+    assistantTextChars,
+    lastJsonlMtimeMs: newMtime,
+    bridgePosted,
+    finalText,
+  };
 };
 
 // A turn that errored before producing ANY assistant output never called

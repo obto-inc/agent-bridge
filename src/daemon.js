@@ -306,6 +306,9 @@ const handleEvent = async (sseEvent) => {
       if (result && result.lastJsonlMtimeMs) {
         session.lastJsonlMtimeMs = result.lastJsonlMtimeMs;
       }
+      if (result && result.jsonlPath && !session.jsonlPath) {
+        session.jsonlPath = result.jsonlPath;
+      }
       saveState(state);
     }
   } catch (err) {
