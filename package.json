@@ -1,6 +1,6 @@
 {
   "name": "@obtoai/agent-bridge",
-  "version": "0.1.0-beta.32",
+  "version": "0.1.0-beta.33",
   "description": "Local consumer for the OBTO Agent Bridge. Receives bridge events over SSE and drives a coding agent (Claude Code or OpenAI Codex) on your machine.",
   "license": "Apache-2.0",
   "author": "OBTO Inc.",
@@ -15,7 +15,8 @@
     "obto-bridge": "bin/obto-bridge.js"
   },
   "scripts": {
-    "start": "node bin/obto-bridge.js start"
+    "start": "node bin/obto-bridge.js start",
+    "test": "node --test 'test/*.test.js'"
   },
   "files": [
     "bin",
