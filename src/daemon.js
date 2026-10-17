@@ -13,6 +13,7 @@
 
 const { loadConfig } = require('./config');
 const { startStream } = require('./stream-client');
+const { createCursor } = require('./stream-cursor');
 const { loadState, saveState, getAgentSession, setAgentSession } = require('./state');
 const { drive, tryResolvePermission, agentFor } = require('./driver');
 const { postAgentActivity, claimThread, postExternalSync } = require('./bridge-http');
@@ -134,6 +135,8 @@ try {
 }
 
 const state = loadState();
+// beta.32 — last SSE id + recent reply ids, for reconnect catch-up (stream-cursor.js).
+const cursor = createCursor();
 let stopped = false;
 let stream = null;
 
@@ -144,6 +147,14 @@ const handleEvent = async (sseEvent) => {
     payload = JSON.parse(sseEvent.data);
   } catch (e) {
     log('error', 'unparseable sse data', { error: e.message });
+    return;
+  }
+
+  // beta.32 — the bridge replays replies newer than our Last-Event-ID after a
+  // reconnect, and that can overlap live delivery. Handle each id once.
+  const eventId = sseEvent.id || payload.messageId;
+  if (!cursor.accept(eventId)) {
+    log('event', 'skip — already seen', { threadId: payload.threadId, messageId: eventId, replayed: !!payload.replayed });
     return;
   }
 
@@ -258,6 +269,7 @@ const handleEvent = async (sseEvent) => {
     author: payload.author,
     messageId: payload.messageId,
     hasSession: !!session,
+    replayed: !!payload.replayed,
   });
 
   // Permission-relay replies: resolve the pending request inside the driver and
@@ -336,13 +348,16 @@ const start = () => {
     discovery: cfg.discovery,
     service: !!process.env.OBTO_BRIDGE_SERVICE,
     boundThreads: Object.keys(state.bindings || {}),
+    streamCursor: cursor.lastEventId(),
   });
 
   const url = cfg.baseUrl.replace(/\/$/, '') +
     '/api/bridge/stream' +
     '?agentId=' + encodeURIComponent(cfg.agentId) +
     '&capabilities=' + encodeURIComponent(capabilities.join(',')) +
-    '&version=' + encodeURIComponent(DAEMON_VERSION);
+    '&version=' + encodeURIComponent(DAEMON_VERSION) +
+    // beta.32 — opt in to the bridge's Last-Event-ID replay (browsers do not).
+    '&replay=1';
   stream = startStream({
     url,
     // Re-read config on every (re)connect so a rotated token (via
@@ -350,10 +365,15 @@ const start = () => {
     // automatically without restarting the daemon.
     getHeaders: () => {
       const fresh = loadConfig();
-      return {
+      const h = {
         'OBTO-ORIGIN-HOST': fresh.originHost,
         Authorization: 'Bearer ' + fresh.apiToken,
       };
+      // beta.32 — the bridge replays human replies newer than this id, so a
+      // reply sent while the stream was down is not lost.
+      const lastId = cursor.lastEventId();
+      if (lastId) h['Last-Event-ID'] = lastId;
+      return h;
     },
     onEvent: (ev) => {
       handleEvent(ev).catch((err) => {
