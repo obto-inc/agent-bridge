@@ -45,6 +45,24 @@ const TAIL_STREAM_MIN_MESSAGES = 10; // stop reading once we have this many text
 const TITLE_MAX_LINES = 40;    // scan up to this many lines for a real first message
 const TITLE_MAX_BYTES = 65536; // hard ceiling per file even if MAX_LINES never reached
 
+// beta.31 — per-file memo. A full parse of ~2100 local sessions took 48 s on
+// the Mac (2026-10-17) and ran every tick, although only a handful of files
+// change between ticks. A file whose (mtime, size) is unchanged returns its
+// previous record; only new or touched files are re-read. Entries for files
+// that disappeared are dropped at the end of each scanAll.
+const fileMemo = new Map(); // filePath -> { mtimeMs, size, record }
+let seenThisScan = null;
+const memoGet = (filePath, stat) => {
+  if (seenThisScan) seenThisScan.add(filePath);
+  const m = fileMemo.get(filePath);
+  if (m && m.mtimeMs === stat.mtimeMs && m.size === stat.size) return m.record;
+  return null;
+};
+const memoPut = (filePath, stat, record) => {
+  fileMemo.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, record });
+  return record;
+};
+
 // Read the tail of a (potentially large) JSONL file without slurping the
 // whole thing into memory. Returns a string (UTF-8) or '' on any failure.
 const readTail = (filePath, maxBytes = TAIL_READ_BYTES) => {
@@ -440,6 +458,8 @@ const walkClaudeProjectsRoot = (root) => {
       const filePath = path.join(projectPath, file);
       let stat;
       try { stat = fs.statSync(filePath); } catch (_) { continue; }
+      const cached = memoGet(filePath, stat);
+      if (cached) { out.push(cached); continue; }
       const tail = readTail(filePath);
       const lastMsg = extractLastMessage(tail);
       let title = extractAiTitleFromTail(tail);
@@ -465,7 +485,7 @@ const walkClaudeProjectsRoot = (root) => {
         } catch (_) {}
       }
       if (cwdM) { try { realCwd = JSON.parse('"' + cwdM[1] + '"'); } catch (_) { realCwd = cwdM[1]; } }
-      out.push({
+      out.push(memoPut(filePath, stat, {
         source: 'claude',
         sessionId,
         projectDir: entry,
@@ -475,7 +495,7 @@ const walkClaudeProjectsRoot = (root) => {
         lastActivityAt: stat.mtimeMs,
         lastMessagePreview: lastMsg ? lastMsg.preview : '',
         lastMessageAuthor: lastMsg ? lastMsg.author : null,
-      });
+      }));
     }
   }
   return out;
@@ -529,6 +549,8 @@ const scanCodex = () => {
           const filePath = path.join(dPath, f);
           let stat;
           try { stat = fs.statSync(filePath); } catch (_) { continue; }
+          const cached = memoGet(filePath, stat);
+          if (cached) { out.push(cached); continue; }
 
           // Pull the session-meta's working directory. The first JSONL line is
           // the session_meta record, but recent Codex builds embed the FULL
@@ -573,7 +595,7 @@ const scanCodex = () => {
           // Recent messages get the streaming tail (handles huge per-message
       // assistant turns that overflow the 16KB fixed budget).
       const recentMessages = extractRecentMessages(readTailUntilMessages(filePath));
-          out.push({
+          out.push(memoPut(filePath, stat, {
             source: 'codex',
             sessionId,
             // No date fallback: "2026/05/22" is not a real cwd and only tricks
@@ -587,7 +609,7 @@ const scanCodex = () => {
             lastActivityAt: stat.mtimeMs,
             lastMessagePreview: lastMsg ? lastMsg.preview : '',
             lastMessageAuthor: lastMsg ? lastMsg.author : null,
-          });
+          }));
         }
       }
     }
@@ -596,13 +618,21 @@ const scanCodex = () => {
 };
 
 // Public entry: returns a flat list of every external session found.
-// Synchronous on purpose — the daemon calls this on a 30s timer and the
-// total IO is dominated by readdir + a single readSync per file. Async
-// would only complicate retry/cancel semantics with no real benefit.
+// Synchronous: the daemon runs it inside a worker thread (scan-host.js), so
+// even the cold first scan never blocks the SSE reader. Unchanged files come
+// from fileMemo, so warm scans cost one readdir + stat per file.
 const scanAll = () => {
-  const claude = scanClaude();
-  const codex = scanCodex();
-  return claude.concat(codex);
+  seenThisScan = new Set();
+  try {
+    const claude = scanClaude();
+    const codex = scanCodex();
+    for (const k of fileMemo.keys()) {
+      if (!seenThisScan.has(k)) fileMemo.delete(k);
+    }
+    return claude.concat(codex);
+  } finally {
+    seenThisScan = null;
+  }
 };
 
 // ── Phase 6.6 — full-history reads for adoption backfill ──────────────────

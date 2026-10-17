@@ -17,11 +17,10 @@ const { loadState, saveState, getAgentSession, setAgentSession } = require('./st
 const { drive, tryResolvePermission, agentFor } = require('./driver');
 const { postAgentActivity, claimThread, postExternalSync } = require('./bridge-http');
 const { detect: detectCapabilities } = require('./capabilities');
-const { scanAll: scanExternalSessions } = require('./external-scanner');
-// Phase 6.5 — OpenCode desktop/CLI uses SQLite instead of JSONL; separate
-// scanner reads ~/.local/share/opencode/opencode.db read-only via the
-// sqlite3 CLI subprocess. Empty array when SQLite or the DB isn't present.
-const { scanAll: scanOpencodeSessions } = require('./opencode-sqlite-scanner');
+// Phase 6.1/6.5 — external discovery: Claude/Codex JSONL + the opencode
+// SQLite DB. beta.31: both scanners run in a worker thread (scan-host.js) so
+// a slow scan never stalls the SSE reader.
+const { scanExternal, stopScanWorker } = require('./scan-host');
 // Phase 6.6 — full-history backfill for adopted threads (fire-and-forget).
 const { backfillFullHistory } = require('./history');
 // Phase 6.8 — advertise the daemon's own version to the bridge (SSE connect
@@ -95,6 +94,7 @@ const fatalAuth = (status, where, body) => {
   writeHealth({ stream: 'fatal', fatalStatus: status, fatalAt: new Date().toISOString(), fatalWhere: where, fix });
   try { stream && stream.stop(); } catch (_) {}
   if (externalScanTimer) { try { clearInterval(externalScanTimer); } catch (_) {} }
+  stopScanWorker();
   setTimeout(() => process.exit(process.env.OBTO_BRIDGE_SERVICE ? 0 : 78), 200);
 };
 
@@ -419,16 +419,18 @@ const externalScanTickInner = async () => {
     // Phase 6.5 — fold opencode SQLite sessions into the same external sync
     // payload. Both scanners are best-effort and return [] on failure, so a
     // dead SQLite CLI or missing DB never breaks the JSONL path.
-    const fromJsonl = scanExternalSessions();
-    let fromOpencode = [];
+    // beta.31 — the scan runs in a worker thread (scan-host.js); it used to
+    // block this thread for up to ~48 s per tick, which held every SSE reply
+    // in the socket buffer until it finished.
+    const scan = await scanExternal();
+    const fromJsonl = scan.fromJsonl || [];
+    const fromOpencode = scan.fromOpencode || [];
     let scanDegraded = false;
-    try {
-      fromOpencode = scanOpencodeSessions();
-    } catch (e) {
+    if (scan.opencodeError) {
       // Phase 6.7 — a failed sub-scan means our inventory is INCOMPLETE this
       // tick; sending it would falsely mark that source's sessions vanished.
       scanDegraded = true;
-      log('warn', 'opencode sqlite scan failed', { error: e && e.message ? e.message : String(e) });
+      log('warn', 'opencode sqlite scan failed', { error: scan.opencodeError });
     }
     const all = fromJsonl.concat(fromOpencode);
     const owned = ownedSessionIdsFromState();
@@ -456,6 +458,7 @@ const externalScanTickInner = async () => {
     } else {
       log('debug', 'external sync ok', {
         sent: external.length,
+        scanMs: scan.ms,
         discovery: cfg.discovery,
         upserted: (r.data && r.data.count) || 0,
         vanished: (r.data && r.data.vanished) || 0,
@@ -508,6 +511,7 @@ const shutdown = (signal) => {
   writeHealth({ stream: 'stopped', stoppedAt: new Date().toISOString(), signal });
   try { stream && stream.stop(); } catch (_) {}
   if (externalScanTimer) { try { clearInterval(externalScanTimer); } catch (_) {} }
+  stopScanWorker();
   setTimeout(() => process.exit(0), 200);
 };
 
