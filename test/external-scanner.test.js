@@ -30,6 +30,46 @@ test('pickClaudeCwd falls back to the tail cwd, then the head, then the decoded 
   assert.equal(scanner.pickClaudeCwd(dir, '', ''), '/Users/me/proj');
 });
 
+test('pickClaudeCwd prefers the head cwd over a scratchpad or missing tail cwd', () => {
+  // Chat 20bf16f2: filed under a sleepy-swanson worktree dir, started in a
+  // reverent-swanson worktree, ended in a deleted scratchpad.
+  const dir = '-Users-me-trunk-OBTO-k8-nodes--claude-worktrees-sleepy-swanson-b44e5b';
+  const head = '/Users/me/trunk/OBTO/k8/nodes/.claude/worktrees/reverent-swanson-b0368a';
+  const scratch = '/private/tmp/claude-501/' + dir + '/20bf16f2/scratchpad';
+  assert.equal(scanner.pickClaudeCwd(dir, head, scratch), head);
+  assert.equal(scanner.pickClaudeCwd(dir, head, '/tmp/claude-501/x/scratchpad'), head);
+  // A missing tail loses to a head that exists; a live tail still wins.
+  const liveHead = tmpDir('agent-bridge-head-');
+  const liveTail = tmpDir('agent-bridge-tail-');
+  assert.equal(scanner.pickClaudeCwd(dir, liveHead, '/nonexistent/tail'), liveHead);
+  assert.equal(scanner.pickClaudeCwd(dir, liveHead, liveTail), liveTail);
+});
+
+test('pickClaudeCwd keeps the scratchpad for a chat started in one', () => {
+  const scratch = '/private/tmp/claude-501/-Users-me-proj/abc/scratchpad';
+  const dir = scanner.encodeClaudeProjectDir(scratch);
+  assert.equal(scanner.pickClaudeCwd(dir, scratch, scratch), scratch);
+  assert.equal(scanner.pickClaudeCwd(dir, scratch, '/Users/me/elsewhere'), scratch);
+});
+
+test('walkClaudeProjectsRoot reports the head cwd when the dir name matches neither cwd', () => {
+  const root = tmpDir();
+  const dirName = '-Users-me-trunk-OBTO-k8-nodes--claude-worktrees-sleepy-swanson-b44e5b';
+  const head = '/Users/me/trunk/OBTO/k8/nodes/.claude/worktrees/reverent-swanson-b0368a';
+  const sid = '20bf16f2-2671-4b10-ad98-4817d704991c';
+  const scratch = '/private/tmp/claude-501/' + dirName + '/' + sid + '/scratchpad';
+  fs.mkdirSync(path.join(root, dirName));
+  fs.writeFileSync(path.join(root, dirName, sid + '.jsonl'), jsonl([
+    userRec('start here', { cwd: head }),
+    assistantRec('ok', { cwd: head }),
+    userRec('continue', { cwd: scratch }),
+    assistantRec('done', { cwd: scratch }),
+  ]));
+  const rows = scanner.walkClaudeProjectsRoot(root);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].projectName, head);
+});
+
 test('readHeadCwd finds the first cwd past a large opening record', () => {
   const root = tmpDir();
   const file = path.join(root, 's.jsonl');

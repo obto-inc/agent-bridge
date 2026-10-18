@@ -490,12 +490,24 @@ const readHeadCwd = (filePath) => {
 // beta.33 — choose the cwd a Claude session should resume in.
 //   1. the HEAD cwd, when its encoding equals the project dir name (the
 //      session was started there, and Claude filed it there);
-//   2. else the TAIL cwd (the last place the session ran a command);
+//   2. else the TAIL cwd (the last place the session ran a command), unless
+//      it is a scratchpad or missing (see beta.34 below);
 //   3. else the head cwd, else the decoded dir name (lossy, display only).
 // Witnessed 2026-10-17: chat fcb87456 (project k8/nodes) ended in a deleted
 // /private/tmp/.../scratchpad, and resuming there failed.
+// beta.34 — rule 2 skips the tail cwd when it is a Claude scratchpad
+// (/private/tmp/claude-<uid>/...) or is gone while the head cwd exists, so
+// the head cwd wins. Witnessed: chat 20bf16f2 is filed under a worktree dir
+// its head cwd does not encode to, and its tail is a deleted scratchpad.
+// A chat started IN a scratchpad keeps it: rule 1 matches its dir name.
+const CLAUDE_SCRATCH_RE = /^\/(?:private\/)?tmp\/claude-\d+\//;
+const dirExists = (p) => { try { return fs.statSync(p).isDirectory(); } catch (_) { return false; } };
 const pickClaudeCwd = (projectDirName, headCwd, tailCwd) => {
   if (headCwd && encodeClaudeProjectDir(headCwd) === projectDirName) return headCwd;
+  if (headCwd && tailCwd
+      && (CLAUDE_SCRATCH_RE.test(tailCwd) || (!dirExists(tailCwd) && dirExists(headCwd)))) {
+    return headCwd;
+  }
   return tailCwd || headCwd || decodeClaudeProjectDir(projectDirName);
 };
 
