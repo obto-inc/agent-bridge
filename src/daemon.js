@@ -25,6 +25,7 @@ const { scanExternal, stopScanWorker } = require('./scan-host');
 // Phase 6.6 — full-history backfill for adopted threads (fire-and-forget).
 const { backfillFullHistory, recordReplyConsent } = require('./history');
 const { resolveResumeCwd } = require('./resume-cwd');
+const { selectSyncSessions } = require('./sync-select');
 // Phase 6.8 — advertise the daemon's own version to the bridge (SSE connect
 // + every sync heartbeat) so the UI can show what each machine is running.
 const DAEMON_VERSION = (() => {
@@ -444,21 +445,6 @@ const start = () => {
 // and the next tick retries. The bridge dedups by (accountId, sessionId).
 const EXTERNAL_SCAN_INTERVAL_MS = 30000;
 let externalScanTimer = null;
-const ownedSessionIdsFromState = () => {
-  const ids = new Set();
-  const bindings = (state && state.bindings) || {};
-  for (const tid of Object.keys(bindings)) {
-    const b = bindings[tid] || {};
-    const sessions = b.sessions && typeof b.sessions === 'object'
-      ? b.sessions
-      : (b.sessionId ? { _flat: b } : {});
-    for (const k of Object.keys(sessions)) {
-      const s = sessions[k] || {};
-      if (s.sessionId) ids.add(String(s.sessionId));
-    }
-  }
-  return ids;
-};
 // beta.28 — a full scan of ~2000 local sessions takes longer than the 30 s
 // interval on a busy machine (first service sync on 2026-10-16: 110 s), so
 // without this guard ticks overlap and the bridge receives interleaved
@@ -493,8 +479,10 @@ const externalScanTickInner = async () => {
       log('warn', 'opencode sqlite scan failed', { error: scan.opencodeError });
     }
     const all = fromJsonl.concat(fromOpencode);
-    const owned = ownedSessionIdsFromState();
-    const external = all.filter((s) => s && s.sessionId && !owned.has(String(s.sessionId)));
+    // beta.34 — adopted sessions (bound under ext-<source>-<prefix>) are sent
+    // too, so a later cwd/title/activity change refreshes their synopsis and
+    // resume cwd. Bridge-originated owned sessions stay out (sync-select.js).
+    const { sessions: external, ownedSent } = selectSyncSessions(all, state);
     // Phase 6.7 — full inventory (external + owned) so the bridge can mark
     // rows whose local file vanished. Sent even when `external` is empty;
     // the bridge ignores empty inventories, so a glitched scan is harmless.
@@ -518,6 +506,7 @@ const externalScanTickInner = async () => {
     } else {
       log('debug', 'external sync ok', {
         sent: external.length,
+        ownedSent,
         scanMs: scan.ms,
         discovery: cfg.discovery,
         upserted: (r.data && r.data.count) || 0,
@@ -526,7 +515,7 @@ const externalScanTickInner = async () => {
         canonical: (r.data && r.data.canonical) || undefined,
       });
       writeHealth({ lastSyncAt: new Date().toISOString(), lastSyncOk: true,
-        lastSync: { sent: external.length, discovery: cfg.discovery,
+        lastSync: { sent: external.length, ownedSent, discovery: cfg.discovery,
           upserted: (r.data && r.data.count) || 0, canonical: (r.data && r.data.canonical) || null } });
     }
   } catch (e) {
