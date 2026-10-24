@@ -60,11 +60,12 @@ const drive = (params) => {
 // We delegate to the claude driver's resolver regardless of the thread's agent:
 // it keys on threadId against its own pending-request map, so a codex thread
 // (which never has a pending claude request) simply returns false and the
-// reply falls through to drive().
-const tryResolvePermission = (threadId, body, log) => {
+// reply falls through to drive(). Async since beta.37 (P0-3): the resolver asks
+// the bridge for the recorded human decision instead of reading the frame.
+const tryResolvePermission = async (threadId, payload, log) => {
   const claude = loadDriver('claude');
   if (typeof claude.tryResolvePermission === 'function') {
-    return claude.tryResolvePermission(threadId, body, log);
+    return claude.tryResolvePermission(threadId, payload, log);
   }
   return false;
 };

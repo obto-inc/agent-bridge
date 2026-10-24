@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -127,10 +128,79 @@ const ALLOWED_TOOLS = new Set([
 
 // ── Permission relay ──────────────────────────────────────────────────────
 // Single-pending-per-thread. If Claude requests a tool needing approval, we
-// post a bridge question and resolve when a matching reply arrives via the
-// daemon's AMQP consumer (which calls tryResolvePermission below).
+// register the request with the bridge, post a question, and wait for a HUMAN
+// decision.
+//
+// P0-3 (beta.37): reply frames carry no authority. Before, any frame whose body
+// was "approve"/"yes" resolved the request, and the agent's own bridge_post
+// (auto-approved, role agent) lands on the same channel, so the model could
+// approve its own Bash call. Now the bridge records the decision server side,
+// only from the human paths (the bridge page session cookie, or DevZone as the
+// owning OBTO user), bound to this permId, with an expiry, and hands it to us
+// exactly once via POST /api/bridge/perm {action:'consume'}. A frame only tells
+// us when to ask; a poll covers a lost frame. Anything unexpected = deny.
 
+const PERM_POLL_MS = parseInt(process.env.BRIDGE_PERM_POLL_MS || '5000', 10);
 const pendingPermissions = new Map();
+
+const newPermId = () => 'perm-' + crypto.randomBytes(8).toString('hex');
+
+// Settles a pending request once; later calls are no-ops.
+const settle = (threadId, pending, decision, log) => {
+  if (pending.settled) return;
+  pending.settled = true;
+  if (pendingPermissions.get(threadId) === pending) pendingPermissions.delete(threadId);
+  clearTimeout(pending.timeoutHandle);
+  clearInterval(pending.pollHandle);
+  log('info', 'permission relay: resolved', {
+    threadId,
+    permId: pending.permId,
+    toolName: pending.toolName,
+    approved: decision.behavior === 'allow',
+    decidedVia: decision.decidedVia || null,
+  });
+  pending.resolve(decision.behavior === 'allow'
+    ? { behavior: 'allow', updatedInput: pending.input }
+    : { behavior: 'deny', message: decision.message });
+};
+
+// Ask the bridge for the human decision. Resolves the pending request when one
+// exists; leaves it waiting while the bridge says 'pending'; denies on any
+// other answer (expired, unknown, consumed elsewhere, transport error).
+const checkDecision = async (threadId, pending, log) => {
+  if (pending.settled || pending.checking) return;
+  pending.checking = true;
+  try {
+    const r = await bridgeHttp.consumePermission(threadId, pending.permId);
+    if (pending.settled) return;
+    const d = r && r.data ? r.data : {};
+    if (r && r.ok && d.decision === 'pending') return;
+    if (r && r.ok && d.decision === 'allow' && d.decidedBy && d.decidedBy.kind === 'human') {
+      settle(threadId, pending, { behavior: 'allow', decidedVia: d.decidedBy.via }, log);
+      return;
+    }
+    if (r && r.ok && d.decision === 'deny') {
+      settle(threadId, pending, {
+        behavior: 'deny',
+        decidedVia: d.decidedBy && d.decidedBy.via,
+        message: 'Human declined the ' + pending.toolName + ' request.',
+      }, log);
+      return;
+    }
+    if (r && r.status >= 500) return; // transient: the timeout still bounds the wait
+    settle(threadId, pending, {
+      behavior: 'deny',
+      message: 'Permission request ' + pending.permId + ' was not approved (' +
+        (d.decision || d.error || ('status ' + (r && r.status))) + ').',
+    }, log);
+  } catch (err) {
+    log('warn', 'permission relay: decision check failed', {
+      threadId, permId: pending.permId, error: err && err.message ? err.message : String(err),
+    });
+  } finally {
+    pending.checking = false;
+  }
+};
 
 const requestPermissionViaBridge = async (threadId, toolName, input, log) => {
   if (pendingPermissions.has(threadId)) {
@@ -142,7 +212,8 @@ const requestPermissionViaBridge = async (threadId, toolName, input, log) => {
     };
   }
 
-  const permId = 'perm-' + Math.random().toString(36).slice(2, 10);
+  const permId = newPermId();
+  const ttlSeconds = Math.max(30, Math.floor(RELAY_TIMEOUT_MS / 1000));
   let inputJson;
   try {
     inputJson = JSON.stringify(input, null, 2);
@@ -150,12 +221,33 @@ const requestPermissionViaBridge = async (threadId, toolName, input, log) => {
     inputJson = '<unserializable>';
   }
 
+  // Register first: with no server-side record no human decision can ever
+  // exist, so fail closed.
+  try {
+    const reg = await bridgeHttp.requestPermission({ threadId, permId, toolName, ttlSeconds });
+    if (!reg.ok || !reg.data || reg.data.registered !== true) {
+      throw new Error('register returned status ' + reg.status +
+        (reg.data && reg.data.error ? ' ' + reg.data.error : ''));
+    }
+  } catch (err) {
+    log('error', 'permission relay: register failed', {
+      threadId, permId, error: err && err.message ? err.message : String(err),
+    });
+    return {
+      behavior: 'deny',
+      message:
+        'Permission relay could not register the request with the bridge (' +
+        (err && err.message ? err.message : String(err)) + '); denied.',
+    };
+  }
+
   const minutes = Math.max(1, Math.floor(RELAY_TIMEOUT_MS / 60000));
   const body =
     '🔐 Permission request ' + permId +
     '\n\nTool: ' + toolName +
     '\nInput:\n' + inputJson +
-    '\n\nReply "approve" to allow, or anything else to deny. Times out in ' +
+    '\n\nReply "approve" from the bridge page or DevZone to allow; any other reply ' +
+    'denies. Only you can approve: replies from the agent do not count. Times out in ' +
     minutes + ' minute' + (minutes === 1 ? '' : 's') + '.';
 
   log('info', 'permission relay: posting question', { threadId, permId, toolName });
@@ -177,6 +269,7 @@ const requestPermissionViaBridge = async (threadId, toolName, input, log) => {
       permId,
       error: err && err.message ? err.message : String(err),
     });
+    bridgeHttp.cancelPermission(permId).catch(() => {});
     return {
       behavior: 'deny',
       message:
@@ -186,56 +279,38 @@ const requestPermissionViaBridge = async (threadId, toolName, input, log) => {
   }
 
   return await new Promise((resolve) => {
-    const timeoutHandle = setTimeout(() => {
-      pendingPermissions.delete(threadId);
+    const pending = { permId, toolName, input, resolve, settled: false, checking: false };
+    pending.timeoutHandle = setTimeout(() => {
       log('warn', 'permission relay: timed out', { threadId, permId, toolName });
-      resolve({
+      bridgeHttp.cancelPermission(permId).catch(() => {});
+      settle(threadId, pending, {
         behavior: 'deny',
         message:
           'Permission request timed out — no human reply within ' + minutes +
           ' minute' + (minutes === 1 ? '' : 's') + '.',
-      });
+      }, log);
     }, RELAY_TIMEOUT_MS);
-
-    pendingPermissions.set(threadId, {
-      permId,
-      toolName,
-      input,
-      resolve,
-      timeoutHandle,
-    });
+    pending.pollHandle = setInterval(() => { checkDecision(threadId, pending, log); }, PERM_POLL_MS);
+    if (pending.pollHandle.unref) pending.pollHandle.unref();
+    pendingPermissions.set(threadId, pending);
   });
 };
 
-// Called by the AMQP consumer for every reply on a thread. If the thread has
-// a pending permission request, resolve it and return true so the consumer
-// skips the normal drive() path. Otherwise return false.
-const tryResolvePermission = (threadId, body, log) => {
+// Called by the daemon for every reply frame. Returns true while the thread has
+// a pending permission request, so the frame never starts a turn; the frame's
+// body and role are NOT trusted — only the bridge's recorded human decision
+// resolves the request.
+const tryResolvePermission = async (threadId, payload, log) => {
   const pending = pendingPermissions.get(threadId);
   if (!pending) return false;
-
-  pendingPermissions.delete(threadId);
-  clearTimeout(pending.timeoutHandle);
-
-  const normalized = String(body || '').trim().toLowerCase();
-  const approved = normalized === 'approve' || normalized === 'yes';
-
-  log('info', 'permission relay: resolved by reply', {
+  const p = payload && typeof payload === 'object' ? payload : { body: payload };
+  log('info', 'permission relay: frame while pending, checking bridge decision', {
     threadId,
     permId: pending.permId,
-    toolName: pending.toolName,
-    approved,
-    replyPreview: String(body || '').slice(0, 80),
+    role: p.role || null,
+    author: p.author || null,
   });
-
-  if (approved) {
-    pending.resolve({ behavior: 'allow', updatedInput: pending.input });
-  } else {
-    pending.resolve({
-      behavior: 'deny',
-      message: 'Human declined: ' + String(body || '').slice(0, 200),
-    });
-  }
+  await checkDecision(threadId, pending, log);
   return true;
 };
 
@@ -778,5 +853,5 @@ module.exports = {
   buildEnvelope,
   buildBootstrapPrompt,
   tryResolvePermission,
-  _internal: { consumeQuery, relayTurn, explainSpawnError, claudeBin: CLAUDE_BIN },
+  _internal: { consumeQuery, relayTurn, explainSpawnError, claudeBin: CLAUDE_BIN, requestPermissionViaBridge, pendingPermissions },
 };

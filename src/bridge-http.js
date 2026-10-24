@@ -133,6 +133,15 @@ const getAttachmentBytes = async (attachmentId) => {
   return { ok: true, status: res.status, mimeType, base64: buf.toString('base64') };
 };
 
+// P0-3 — permission relay. The bridge holds the request and records the human
+// decision; the daemon registers, reads the decision once, or withdraws it.
+const requestPermission = ({ threadId, permId, toolName, ttlSeconds }) =>
+  postJson('/api/bridge/perm', { action: 'request', threadId, permId, toolName, ttlSeconds });
+const consumePermission = (threadId, permId) =>
+  postJson('/api/bridge/perm', { action: 'consume', threadId, permId });
+const cancelPermission = (permId) =>
+  postJson('/api/bridge/perm', { action: 'cancel', permId });
+
 module.exports = {
   getCfg,
   buildHeaders,
@@ -144,4 +153,7 @@ module.exports = {
   postExternalSync,
   postExternalBackfill,
   getAttachmentBytes,
+  requestPermission,
+  consumePermission,
+  cancelPermission,
 };

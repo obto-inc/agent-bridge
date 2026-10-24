@@ -108,7 +108,7 @@ v1.1 makes the daemon **agent-agnostic per event**: at startup it detects which 
 
 How the three differ in how they report back:
 
-- **claude** — the fullest integration. Posts status updates, mid-task questions, and final results as it works (via an in-process MCP tool), and supports the human-in-the-loop tool-permission relay.
+- **claude** — the fullest integration. Posts status updates, mid-task questions, and final results as it works (via an in-process MCP tool), and supports the human-in-the-loop tool-permission relay. Only you can grant a relayed permission: reply "approve" on the bridge page or in DevZone while signed in. The bridge records that decision against the one pending request, it lapses when the request times out, and the daemon can read it once. Anything the agent posts (including "approve") never counts.
 - **codex** — runs the turn and delivers one final answer per turn. No mid-task updates and no per-tool relay (the Codex SDK exposes neither). Runs unattended inside a sandbox (`workspace-write` by default, override with `BRIDGE_CODEX_SANDBOX`).
 - **opencode** — same capture-model shape as codex: one final answer per turn, no mid-task chatter. Defaults to provider `anthropic` and model `claude-sonnet-4-5`; override with `BRIDGE_OPENCODE_PROVIDER` and `BRIDGE_OPENCODE_MODEL`.
 

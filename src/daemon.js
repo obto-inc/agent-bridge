@@ -310,9 +310,10 @@ const handleEvent = async (sseEvent) => {
     replayed: !!payload.replayed,
   });
 
-  // Permission-relay replies: resolve the pending request inside the driver and
-  // skip starting a new turn.
-  if (tryResolvePermission(threadId, payload.body || '', log)) {
+  // Permission relay: while a tool permission is pending on this thread no frame
+  // starts a turn; the driver asks the bridge for the recorded human decision
+  // (P0-3) and never trusts the frame's body or role.
+  if (await tryResolvePermission(threadId, payload, log)) {
     return;
   }
 
