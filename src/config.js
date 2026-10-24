@@ -71,4 +71,22 @@ const loadConfig = () => {
   return cfg;
 };
 
-module.exports = { loadConfig, CONFIG_DIR, CONFIG_PATH };
+// beta.36 — per-machine tokens: every authenticated request names its machine
+// (X-Obto-Agent-Id), so the bridge can move a pre-beta.36 account-wide token
+// into this machine's own row. Header values must be printable ASCII; an
+// agentId outside that range is simply not sent.
+const agentIdHeader = (agentId) => {
+  const v = String(agentId || '').trim().slice(0, 120);
+  return v && /^[\x20-\x7e]+$/.test(v) ? { 'X-Obto-Agent-Id': v } : {};
+};
+
+// Bearer + routing + machine headers for a bridge request.
+const authHeaders = (cfg) => Object.assign(
+  {
+    'OBTO-ORIGIN-HOST': cfg.originHost,
+    Authorization: 'Bearer ' + cfg.apiToken,
+  },
+  agentIdHeader(cfg.agentId),
+);
+
+module.exports = { loadConfig, authHeaders, agentIdHeader, CONFIG_DIR, CONFIG_PATH };

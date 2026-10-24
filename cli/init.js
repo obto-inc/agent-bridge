@@ -40,6 +40,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const readline = require('readline');
+const { agentIdHeader } = require('../src/config');
 
 const CONFIG_DIR = path.join(os.homedir(), '.obto-bridge');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
@@ -132,6 +133,8 @@ const registerSelfServe = async ({ baseUrl, originHost, email, username, passwor
 
 // One Thread OT-7b — trade a one-time link code for a token. The code IS the
 // credential (one exchange per code, ever), so no bearer header is sent.
+const PKG_VERSION = (() => { try { return require('../package.json').version; } catch (_) { return null; } })();
+
 const exchangeLinkCode = async ({ linkUrl, code, agentId }) => {
   const res = await fetch(linkUrl, {
     method: 'POST',
@@ -139,7 +142,12 @@ const exchangeLinkCode = async ({ linkUrl, code, agentId }) => {
       Accept: 'application/json',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ code, agentId }),
+    // beta.36 — per-machine tokens: the token is minted for this machine only.
+    body: JSON.stringify({
+      code,
+      agentId,
+      machine: { hostname: os.hostname(), platform: os.platform() + ' ' + os.arch(), clientVersion: PKG_VERSION },
+    }),
     cache: 'no-store',
     redirect: 'manual',
   });
@@ -151,11 +159,11 @@ const validateAgainstServer = async (cfg) => {
   const url = cfg.baseUrl.replace(/\/$/, '') + '/api/bridge/whoami';
   const res = await fetch(url, {
     method: 'GET',
-    headers: {
+    headers: Object.assign({
       Accept: 'application/json',
       'OBTO-ORIGIN-HOST': cfg.originHost,
       Authorization: 'Bearer ' + cfg.apiToken,
-    },
+    }, agentIdHeader(cfg.agentId)),
     cache: 'no-store',
   });
   const text = await res.text();
@@ -255,7 +263,8 @@ const saveLinked = async (d, ctx, existing, fix, extra) => {
   }
 
   const t = d.tenant || {};
-  const how = d.created ? 'new bridge account' : (d.adopted ? 'adopted your existing bridge account' : 'token rotated');
+  const how = d.created ? 'new bridge account' : (d.adopted ? 'adopted your existing bridge account'
+    : (d.machineToken ? 'new token for this machine; your other machines stay signed in' : 'token rotated'));
   console.log('');
   if (t.obtoDomain) {
     console.log('✓ linked to ' + t.obtoDomain + ' as ' + (t.obtoUserName || t.obtoUserId || '?') + '  (' + how + ')');

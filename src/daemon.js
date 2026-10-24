@@ -11,7 +11,7 @@
   } catch (_) {}
 })();
 
-const { loadConfig } = require('./config');
+const { loadConfig, authHeaders } = require('./config');
 const { startStream } = require('./stream-client');
 const { createCursor } = require('./stream-cursor');
 const { loadState, saveState, getAgentSession, setAgentSession } = require('./state');
@@ -403,10 +403,7 @@ const start = () => {
     // automatically without restarting the daemon.
     getHeaders: () => {
       const fresh = loadConfig();
-      const h = {
-        'OBTO-ORIGIN-HOST': fresh.originHost,
-        Authorization: 'Bearer ' + fresh.apiToken,
-      };
+      const h = authHeaders(fresh);
       // beta.32 — the bridge replays human replies newer than this id, so a
       // reply sent while the stream was down is not lost.
       const lastId = cursor.lastEventId();

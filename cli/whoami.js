@@ -4,7 +4,7 @@
 // Bearer token and print the result. Verifies (1) config is valid,
 // (2) bridge is reachable, (3) token resolves to an active account.
 
-const { loadConfig } = require('../src/config');
+const { loadConfig, authHeaders } = require('../src/config');
 
 const main = async () => {
   let cfg;
@@ -21,11 +21,7 @@ const main = async () => {
   try {
     res = await fetch(url, {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        'OBTO-ORIGIN-HOST': cfg.originHost,
-        Authorization: 'Bearer ' + cfg.apiToken,
-      },
+      headers: Object.assign({ Accept: 'application/json' }, authHeaders(cfg)),
       cache: 'no-store',
     });
   } catch (err) {
@@ -58,6 +54,15 @@ const main = async () => {
   console.log('  Email:      ' + (a.email || '?'));
   console.log('  Status:     ' + (a.status || '?'));
   console.log('  Token:      ' + (a.apiTokenPrefix || '?') + '…');
+  // beta.36 — per-machine tokens: which machine this token belongs to.
+  const m = parsed.machine;
+  if (m) {
+    console.log('  Machine token: ' + m.tokenId + ' for "' + m.agentId + '" (' + (m.createdVia || '?') +
+      ', since ' + (m.createdAt || '?') + ')');
+  } else if ('machine' in parsed) {
+    console.log('  Machine token: none — this is the old account-wide token; it moves to this');
+    console.log('                 machine on the daemon\'s next request.');
+  }
   console.log('  Agent name: ' + (cfg.agentId || '?'));
   console.log('  Project:    ' + (cfg.projectDir || '?'));
   console.log('');

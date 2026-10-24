@@ -4,7 +4,7 @@
 // (per-account token), sets the OBTO-ORIGIN-HOST header so requests route
 // to the ob-agent-bridge app even when its DNS hasn't propagated.
 
-const { loadConfig } = require('./config');
+const { loadConfig, authHeaders } = require('./config');
 
 // No caching. loadConfig() always re-reads ~/.obto-bridge/config.json so a
 // token rotation (which rewrites the file) takes effect on the next request.
@@ -14,11 +14,8 @@ const getCfg = () => loadConfig();
 const buildHeaders = (extra) => {
   const c = getCfg();
   return Object.assign(
-    {
-      'Content-Type': 'application/json',
-      'OBTO-ORIGIN-HOST': c.originHost,
-      Authorization: 'Bearer ' + c.apiToken,
-    },
+    { 'Content-Type': 'application/json' },
+    authHeaders(c),
     extra || {},
   );
 };
@@ -127,10 +124,7 @@ const getAttachmentBytes = async (attachmentId) => {
     '/api/bridge/attachment/' + encodeURIComponent(String(attachmentId));
   const res = await fetch(url, {
     method: 'GET',
-    headers: {
-      'OBTO-ORIGIN-HOST': c.originHost,
-      Authorization: 'Bearer ' + c.apiToken,
-    },
+    headers: authHeaders(c),
     cache: 'no-store',
   });
   if (!res.ok) return { ok: false, status: res.status };

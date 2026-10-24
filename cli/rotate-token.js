@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { agentIdHeader } = require('../src/config');
 
 const CONFIG_PATH = path.join(os.homedir(), '.obto-bridge', 'config.json');
 
@@ -37,6 +38,7 @@ const main = async () => {
         Accept: 'application/json',
         'OBTO-ORIGIN-HOST': cfg.originHost || 'ob-agent-bridge.obto.co',
         Authorization: 'Bearer ' + cfg.apiToken,
+        ...agentIdHeader(cfg.agentId),
       },
       body: '{}',
       cache: 'no-store',
@@ -76,7 +78,9 @@ const main = async () => {
     process.exit(4);
   }
 
-  console.log('✓ Token rotated. Previous config backed up to:');
+  console.log(parsed.machineToken
+    ? '✓ Token rotated for this machine only (' + parsed.machineToken.agentId + '). Previous config backed up to:'
+    : '✓ Token rotated. Previous config backed up to:');
   console.log('  ' + backup);
   console.log('');
   console.log('If the daemon is running, restart it to pick up the new token.');
