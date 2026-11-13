@@ -26,9 +26,11 @@ const onPath = (cmd) => {
   }
 };
 
-const detect = () => {
+const detect = (cfg) => {
   const out = ['claude', 'opencode']; // bundled SDKs; always advertised
   if (onPath('codex')) out.push('codex');
+  // DZ-B1 B1-3 — only after `obto-bridge browser enable` on this machine.
+  if (cfg && cfg.browser) out.push('browser');
   return out;
 };
 

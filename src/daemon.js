@@ -16,7 +16,8 @@ const { startStream } = require('./stream-client');
 const { createCursor } = require('./stream-cursor');
 const { loadState, saveState, getAgentSession, setAgentSession } = require('./state');
 const { drive, tryResolvePermission, agentFor } = require('./driver');
-const { postAgentActivity, claimThread, postExternalSync } = require('./bridge-http');
+const { postAgentActivity, claimThread, postExternalSync, postBrowserResult } = require('./bridge-http');
+const { createBrowserChannel } = require('./browser-channel');
 const { detect: detectCapabilities } = require('./capabilities');
 // Phase 6.1/6.5 — external discovery: Claude/Codex JSONL + the opencode
 // SQLite DB. beta.31: both scanners run in a worker thread (scan-host.js) so
@@ -142,7 +143,16 @@ const cursor = createCursor();
 let stopped = false;
 let stream = null;
 
+// DZ-B1 B1-3 — browser command channel (ping/echo now; the driver lands in B1-4).
+const browserChannel = createBrowserChannel({
+  getConfig: loadConfig,
+  postResult: postBrowserResult,
+  log: (level, msg, data) => log(level, msg, data),
+  version: DAEMON_VERSION,
+});
+
 const handleEvent = async (sseEvent) => {
+  if (sseEvent.event === 'browser.cmd') { await browserChannel.handle(sseEvent.data); return; }
   if (sseEvent.event !== 'reply') return;
   let payload;
   try {
@@ -375,7 +385,7 @@ const handleEvent = async (sseEvent) => {
 const start = () => {
   // Phase 2b — advertise capabilities to the bridge on connect so the UI
   // picker can offer just the agents that are actually installable here.
-  const capabilities = detectCapabilities();
+  const capabilities = detectCapabilities(loadConfig());
 
   log('info', 'starting daemon', {
     version: DAEMON_VERSION,

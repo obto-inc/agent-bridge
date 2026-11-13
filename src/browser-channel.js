@@ -1,0 +1,87 @@
+'use strict';
+
+// DZ-B1 B1-3 — browser command channel (daemon side).
+//
+// The bridge sends `event: browser.cmd` on this machine's SSE stream (AMQP key
+// bridge.<accountId>.browser.<machineKey>, bound only by this machine's stream).
+// Each command is answered once with POST /api/bridge/browser/result.
+//
+// This phase carries the channel only: `ping` and `echo`. Real browser actions
+// (open, read, click, ...) arrive with the browser driver (B1-4) and answer
+// `not_implemented` until then.
+//
+// Guards, enforced here and not trusted to the server or the model:
+//   - browser control is off unless `obto-bridge browser enable` set it;
+//   - the command must name this machine;
+//   - an expired command (expiresAt in the past) is refused;
+//   - a command id is handled at most once (replayed or duplicated ids are dropped);
+//   - only known actions run.
+
+const SEEN_MAX = 500;
+const ACTIONS = new Set(['ping', 'echo']);
+const ARGS_MAX_CHARS = 8000;
+
+const createBrowserChannel = ({ getConfig, postResult, log, version }) => {
+  const seen = new Map(); // cmdId -> handledAt, oldest first
+
+  const remember = (id) => {
+    seen.set(id, Date.now());
+    while (seen.size > SEEN_MAX) seen.delete(seen.keys().next().value);
+  };
+
+  // Returns the result body that was posted (or would be, for a dropped command: null).
+  const handle = async (rawData) => {
+    const startedAt = Date.now();
+    let cmd;
+    try {
+      cmd = JSON.parse(rawData);
+    } catch (_) {
+      log('warn', 'browser.cmd unparseable');
+      return null;
+    }
+    const cmdId = String((cmd && cmd.cmdId) || '').trim();
+    if (!/^[A-Za-z0-9_-]{8,80}$/.test(cmdId)) {
+      log('warn', 'browser.cmd without a valid cmdId');
+      return null;
+    }
+    if (seen.has(cmdId)) {
+      log('event', 'browser.cmd skip — already handled', { cmdId });
+      return null;
+    }
+    remember(cmdId);
+
+    const cfg = getConfig();
+    const reply = async (ok, fields) => {
+      const body = Object.assign(
+        { cmdId, agentId: cfg.agentId, ok, tookMs: Date.now() - startedAt, daemonVersion: version },
+        fields,
+      );
+      try {
+        const r = await postResult(body);
+        if (!r || !r.ok) log('warn', 'browser result post failed', { cmdId, status: r && r.status });
+      } catch (e) {
+        log('warn', 'browser result post threw', { cmdId, error: e && e.message });
+      }
+      return body;
+    };
+
+    if (!cfg.browser) return reply(false, { error: 'browser_disabled', message: 'Browser control is off on this machine (obto-bridge browser enable).' });
+    if (String(cmd.agentId || '') !== String(cfg.agentId || '')) return reply(false, { error: 'wrong_machine' });
+    const exp = Date.parse(cmd.expiresAt || '');
+    if (!Number.isFinite(exp) || exp < Date.now()) return reply(false, { error: 'expired' });
+    const action = String(cmd.action || '');
+    if (!ACTIONS.has(action)) return reply(false, { error: 'not_implemented', message: 'Action "' + action.slice(0, 40) + '" is not available on this machine yet.' });
+
+    if (action === 'ping') return reply(true, { result: { pong: true, at: new Date().toISOString() } });
+    // echo: return the args unchanged (size-capped), proving the round trip.
+    const args = cmd.args === undefined ? null : cmd.args;
+    const text = JSON.stringify(args);
+    if (text && text.length > ARGS_MAX_CHARS) return reply(false, { error: 'args_too_large' });
+    log('event', 'browser.cmd echo', { cmdId });
+    return reply(true, { result: { echo: args } });
+  };
+
+  return { handle, _seen: seen };
+};
+
+module.exports = { createBrowserChannel, ACTIONS };

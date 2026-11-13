@@ -11,6 +11,7 @@ const subcommands = {
   'rotate-token':      '../cli/rotate-token',
   'install-service':   '../cli/install-service',
   'uninstall-service': '../cli/uninstall-service',
+  browser:             '../cli/browser',
 };
 
 const usage = () => {
@@ -25,6 +26,7 @@ const usage = () => {
   console.error('  install-service       Run the daemon in the background, start at login (launchd / systemd).');
   console.error('  uninstall-service     Stop the background daemon and remove the unit.');
   console.error('  start                 Run the daemon (foreground).');
+  console.error('  browser enable|disable|status  Allow the OBTO agent to send browser commands to this machine (off by default).');
   console.error('  status                Daemon health (connected / reconnecting / stopped) + bindings. --json');
   console.error('  whoami         Verify config and show your account info from the server.');
   console.error('  rotate-token   Rotate your API token; old token is invalidated, config is updated.');

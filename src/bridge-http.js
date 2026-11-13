@@ -72,6 +72,9 @@ const getMessages = (threadId, sinceCursor) => {
 // Transient "agent is working / idle" signal. Fire-and-forget from the daemon
 // around each Claude turn so the browser UI can show a thinking indicator.
 // Not persisted server-side — pure RMQ pub/sub via BridgeBroker.
+// DZ-B1 B1-3 — answer one browser.cmd (see browser-channel.js).
+const postBrowserResult = (body) => postJson('/api/bridge/browser/result', body);
+
 const postAgentActivity = (threadId, state) =>
   postJson('/api/bridge/agent-activity', { threadId, state });
 
@@ -156,4 +159,5 @@ module.exports = {
   requestPermission,
   consumePermission,
   cancelPermission,
+  postBrowserResult,
 };
