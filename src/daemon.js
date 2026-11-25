@@ -18,6 +18,7 @@ const { loadState, saveState, getAgentSession, setAgentSession } = require('./st
 const { drive, tryResolvePermission, agentFor } = require('./driver');
 const { postAgentActivity, claimThread, postExternalSync, postBrowserResult } = require('./bridge-http');
 const { createBrowserChannel } = require('./browser-channel');
+const { createBrowserDriver } = require('./browser-driver');
 const { detect: detectCapabilities } = require('./capabilities');
 // Phase 6.1/6.5 — external discovery: Claude/Codex JSONL + the opencode
 // SQLite DB. beta.31: both scanners run in a worker thread (scan-host.js) so
@@ -143,12 +144,18 @@ const cursor = createCursor();
 let stopped = false;
 let stream = null;
 
-// DZ-B1 B1-3 — browser command channel (ping/echo now; the driver lands in B1-4).
+// DZ-B1 B1-3/B1-4 — browser command channel and driver. The driver (and Chrome)
+// starts on the first browser action, never at daemon start.
+let browserDriver = null;
 const browserChannel = createBrowserChannel({
   getConfig: loadConfig,
   postResult: postBrowserResult,
   log: (level, msg, data) => log(level, msg, data),
   version: DAEMON_VERSION,
+  getDriver: () => {
+    if (!browserDriver) browserDriver = createBrowserDriver({ log: (level, msg, data) => log(level, msg, data) });
+    return browserDriver;
+  },
 });
 
 const handleEvent = async (sseEvent) => {
@@ -569,6 +576,7 @@ const shutdown = (signal) => {
   try { stream && stream.stop(); } catch (_) {}
   if (externalScanTimer) { try { clearInterval(externalScanTimer); } catch (_) {} }
   stopScanWorker();
+  if (browserDriver && browserDriver.isOpen()) { browserDriver.stop('daemon_shutdown').catch(() => {}); }
   setTimeout(() => process.exit(0), 200);
 };
 

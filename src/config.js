@@ -58,6 +58,8 @@ const loadConfig = () => {
     // show history before the first reply. Anything else → 'metadata'.
     // DZ-B1 B1-3 — browser control is off unless `obto-bridge browser enable` set it.
     browser: (process.env.BRIDGE_BROWSER === '1') || file.browser === true,
+    // DZ-B1 B1-4 — per-site grants: { "<site>": "read" | "act" } (obto-bridge browser allow).
+    browserGrants: file.browserGrants && typeof file.browserGrants === 'object' ? file.browserGrants : {},
     discovery: (() => {
       const v = String(process.env.BRIDGE_DISCOVERY || file.discovery || 'metadata').trim().toLowerCase();
       return v === 'full' ? 'full' : 'metadata';

@@ -71,7 +71,7 @@ test('a replayed command id runs once', async () => {
 
 test('unknown actions answer not_implemented', async () => {
   const { ch } = setup();
-  const r = await ch.handle(cmd({ action: 'click' }));
+  const r = await ch.handle(cmd({ action: 'teleport' }));
   assert.strictEqual(r.error, 'not_implemented');
 });
 

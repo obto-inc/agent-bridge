@@ -6,9 +6,9 @@
 // bridge.<accountId>.browser.<machineKey>, bound only by this machine's stream).
 // Each command is answered once with POST /api/bridge/browser/result.
 //
-// This phase carries the channel only: `ping` and `echo`. Real browser actions
-// (open, read, click, ...) arrive with the browser driver (B1-4) and answer
-// `not_implemented` until then.
+// `ping` and `echo` prove the channel. Browser actions (open, read, find,
+// click, type, scroll, back, screenshot, tabs, close) go to the browser driver
+// (B1-4, browser-driver.js), which enforces site grants and field guards.
 //
 // Guards, enforced here and not trusted to the server or the model:
 //   - browser control is off unless `obto-bridge browser enable` set it;
@@ -18,10 +18,12 @@
 //   - only known actions run.
 
 const SEEN_MAX = 500;
-const ACTIONS = new Set(['ping', 'echo']);
+const { DRIVER_ACTIONS } = require('./browser-driver');
+
+const ACTIONS = new Set(['ping', 'echo'].concat(DRIVER_ACTIONS));
 const ARGS_MAX_CHARS = 8000;
 
-const createBrowserChannel = ({ getConfig, postResult, log, version }) => {
+const createBrowserChannel = ({ getConfig, postResult, log, version, getDriver }) => {
   const seen = new Map(); // cmdId -> handledAt, oldest first
 
   const remember = (id) => {
@@ -73,12 +75,25 @@ const createBrowserChannel = ({ getConfig, postResult, log, version }) => {
     if (!ACTIONS.has(action)) return reply(false, { error: 'not_implemented', message: 'Action "' + action.slice(0, 40) + '" is not available on this machine yet.' });
 
     if (action === 'ping') return reply(true, { result: { pong: true, at: new Date().toISOString() } });
-    // echo: return the args unchanged (size-capped), proving the round trip.
     const args = cmd.args === undefined ? null : cmd.args;
     const text = JSON.stringify(args);
     if (text && text.length > ARGS_MAX_CHARS) return reply(false, { error: 'args_too_large' });
-    log('event', 'browser.cmd echo', { cmdId });
-    return reply(true, { result: { echo: args } });
+    if (action === 'echo') {
+      // echo: return the args unchanged (size-capped), proving the round trip.
+      log('event', 'browser.cmd echo', { cmdId });
+      return reply(true, { result: { echo: args } });
+    }
+    const driver = typeof getDriver === 'function' ? getDriver() : null;
+    if (!driver) return reply(false, { error: 'driver_unavailable', message: 'The browser driver is not available on this machine.' });
+    log('event', 'browser.cmd', { cmdId, action });
+    let out;
+    try {
+      out = await driver.run(Object.assign({}, cmd, { cmdId, action }), cfg);
+    } catch (e) {
+      out = { ok: false, error: 'driver_failed', message: e && e.message ? String(e.message).slice(0, 300) : null };
+    }
+    const fields = out.ok ? { result: out.result } : { error: out.error, message: out.message || null, result: out.site ? { site: out.site } : undefined };
+    return reply(!!out.ok, fields);
   };
 
   return { handle, _seen: seen };

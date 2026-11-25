@@ -165,6 +165,31 @@ Within ~5–10 seconds you should see the agent's reply appear back on the threa
 | `obto-bridge rotate-token` | Rotate the API token (bridge-only accounts; linked accounts re-link with a new code instead) |
 | `obto-bridge logout` | Wipe `~/.obto-bridge/config.json` |
 
+## Browser control (preview, off by default)
+
+The OBTO agent can drive a separate, visible Chrome window on this machine. It uses your installed Chrome with its
+own profile in `~/.obto-bridge/chrome-profile`, so your everyday Chrome and its logins are not touched. Sign in to a
+site in that window once and the login stays there, on this machine.
+
+```
+obto-bridge browser enable                    # then restart the daemon
+obto-bridge browser allow linkedin.com read   # open and read pages
+obto-bridge browser allow example.com act     # also click and type
+obto-bridge browser deny linkedin.com
+obto-bridge browser status                    # on/off and every grant
+```
+
+Rules the daemon enforces, whatever the agent asks:
+
+- Only sites you granted. A link or redirect to any other site is undone.
+- It never types passwords, card numbers, CVV, one-time codes, bank or ID numbers. You sign in yourself.
+- It never clicks buy, pay, checkout, transfer or delete-account buttons.
+- No downloads, no `file://` or `chrome://` pages, and no cookies or storage ever leave the machine.
+- The window shows "OBTO agent is driving this window" with a **Stop** button. Stop closes the window and refuses
+  the rest of that run.
+- Every action is logged to `~/.obto-bridge/browser-audit.jsonl` (URL without query string; typed text is never
+  logged).
+
 ## How it actually works
 
 ```
