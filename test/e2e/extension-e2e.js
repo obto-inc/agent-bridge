@@ -15,10 +15,17 @@ const { createBrowserDriver } = require(R+'/src/browser-driver');
   for (const d of [path.join(profile,'NativeMessagingHosts'), cftDir]) { fs.mkdirSync(d,{recursive:true}); fs.writeFileSync(path.join(d,'co.obto.bridge.json'),man); }
   const srv=http.createServer((q,r)=>{r.setHeader('content-type','text/html');
     if(q.url.startsWith('/two')) return r.end('<h1>Page two</h1><a href="https://example.org/">offsite</a>');
-    r.end('<h1>Test page</h1><label>Name <input id=n name=name></label><label>Password <input type=password name=pw></label><button onclick="document.title=\'clicked:\'+document.getElementById(\'n\').value">Save draft</button><button>Buy now</button><a href="/two">Go two</a>');}).listen(0);
+    r.end('<h1>Test page</h1><label>Name <input id=n name=name></label><label>Password <input type=password name=pw></label><button onclick="document.title=\'clicked:\'+document.getElementById(\'n\').value">Save draft</button><button>Buy now</button><button>Send</button><a href="/two">Go two</a>');}).listen(0);
   const port=srv.address().port;
   const link=createExtLink({socketPath:sock}); await link.start();
-  const ctx=await chromium.launchPersistentContext(profile,{headless:false,executablePath:process.env.HOME+'/Library/Caches/ms-playwright/chromium-1243/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',args:['--disable-extensions-except='+R+'/extension','--load-extension='+R+'/extension']});
+  const ctx=await chromium.launchPersistentContext(profile,{headless:false,executablePath:process.env.CHROME||undefined,args:['--disable-extensions-except='+R+'/extension','--load-extension='+R+'/extension']});
+  // Consent gate: the welcome page opens on install and nothing links before "I agree".
+  await new Promise(r=>setTimeout(r,3000));
+  console.log('linked before consent:', link.connected());
+  let welcome=ctx.pages().find(p=>p.url().includes('welcome.html'));
+  const tw=Date.now(); while(!welcome && Date.now()-tw<5000){ await new Promise(r=>setTimeout(r,200)); welcome=ctx.pages().find(p=>p.url().includes('welcome.html')); }
+  console.log('welcome page opened:', !!welcome);
+  await welcome.click('#agree');
   const t0=Date.now(); while(!link.connected() && Date.now()-t0<15000) await new Promise(r=>setTimeout(r,200));
   console.log('connected',link.connected(),link.info());
   const drv=createBrowserDriver({ext:link,auditPath:path.join(dir,'audit.jsonl'),launcher:async()=>{throw new Error('profile launched!')}});
@@ -31,6 +38,7 @@ const { createBrowserDriver } = require(R+'/src/browser-driver');
   await run('type',{target:'Name',text:'hello'});
   await run('type',{target:'Password',text:'x'});
   await run('click',{target:'Buy now'});
+  await run('click',{target:'Send'});
   await run('click',{target:'Save draft'});
   await run('tabs',{});
   await run('click',{target:'Go two'});

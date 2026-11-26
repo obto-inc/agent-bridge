@@ -15,3 +15,4 @@ MEDIUM_DRAFT_*.md
 
 # Internal planning — keep out of the public repo
 TODO.md
+dist/

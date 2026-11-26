@@ -48,9 +48,26 @@ const badge = () => {
 
 const send = (m) => { try { if (port) port.postMessage(m); } catch (_) {} };
 
-const connect = () => {
+// Consent (store policy, enforced since 2026-08-01): nothing links to the bridge
+// until the user agreed on the welcome page, and "Turn off" in the popup unlinks.
+const CONSENT_VERSION = 1;
+const consentGiven = async () => {
+  const s = await chrome.storage.local.get(['consent', 'enabled']);
+  return !!(s.consent && s.consent.version === CONSENT_VERSION && s.enabled !== false);
+};
+
+const disconnect = () => {
+  clearTimeout(retryTimer);
+  if (port) { try { port.disconnect(); } catch (_) {} }
+  port = null;
+  daemonUp = false;
+  badge();
+};
+
+const connect = async () => {
   if (port) return;
   clearTimeout(retryTimer);
+  if (!(await consentGiven())) { badge(); return; }
   try { port = chrome.runtime.connectNative(HOST); } catch (_) { port = null; }
   if (!port) { retryTimer = setTimeout(connect, 30000); return; }
   port.onMessage.addListener(onMessage);
@@ -65,7 +82,13 @@ const connect = () => {
 };
 
 chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
+chrome.runtime.onInstalled.addListener(async () => {
+  if (!(await consentGiven())) {
+    const s = await chrome.storage.local.get(['consent']);
+    if (!s.consent || s.consent.version !== CONSENT_VERSION) chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
+  }
+  connect();
+});
 connect();
 
 // ---- tab group and tab ids ----
@@ -261,7 +284,7 @@ const doAction = async (action, args, grants, timeoutMs) => {
     if (!found || !found.found) return fail('target_not_found', 'Nothing matches "' + String(args.target || '').slice(0, 80) + '". Use read for refs.');
     if (action === 'click') {
       const refused = G.clickRefusal(found.info.text);
-      if (refused) return fail(refused, 'Buying, paying, transferring or deleting an account needs your own click.');
+      if (refused) return fail(refused, 'Sending, posting, submitting, buying, paying, accepting or deleting needs a click from the user. Prepare it, then ask the user to press it.');
     } else {
       const refused = G.fieldRefusal(found.info);
       if (refused) return fail(refused, 'Passwords, payment, one-time codes, bank and ID numbers are typed by you, never by the agent.');
@@ -305,7 +328,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     if (msg && msg.type === 'status') {
       const st = await getState();
       const count = (await groupAlive(st.groupId)) ? (await chrome.tabs.query({ groupId: st.groupId })).length : 0;
-      return { native: !!port, daemon: daemonUp, tabs: count, version: VERSION };
+      const c = await chrome.storage.local.get(['consent', 'enabled']);
+      const agreed = !!(c.consent && c.consent.version === CONSENT_VERSION);
+      return { agreed, enabled: c.enabled !== false, native: !!port, daemon: daemonUp, tabs: count, version: VERSION };
     }
     if (msg && msg.type === 'share') {
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -326,6 +351,21 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       return { ok: true };
     }
     if (msg && msg.type === 'reconnect') { connect(); return { ok: true }; }
+    if (msg && msg.type === 'consent') {
+      if (msg.agree) {
+        await chrome.storage.local.set({ consent: { version: CONSENT_VERSION, at: new Date().toISOString() }, enabled: true });
+        connect();
+      } else {
+        await chrome.storage.local.remove('consent');
+        disconnect();
+      }
+      return { ok: true };
+    }
+    if (msg && msg.type === 'enable') {
+      await chrome.storage.local.set({ enabled: !!msg.on });
+      if (msg.on) connect(); else { send({ type: 'stop' }); disconnect(); }
+      return { ok: true };
+    }
     return { ok: false };
   })().then(reply, (e) => reply({ ok: false, error: String(e && e.message) }));
   return true;

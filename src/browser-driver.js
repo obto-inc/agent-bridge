@@ -293,7 +293,7 @@ const createBrowserDriver = (opts) => {
       if (!el) return fail('target_not_found', 'Nothing matches "' + String(args.target || '').slice(0, 80) + '". Use read for refs.');
       const info = await el.evaluate(elementInfo);
       const refused = clickRefusal(info.text);
-      if (refused) return fail(refused, 'Buying, paying, transferring or deleting an account needs your own click.');
+      if (refused) return fail(refused, 'Sending, posting, submitting, buying, paying, accepting or deleting needs a click from the user. Prepare it, then ask the user to press it.');
       await el.click({ timeout: Math.min(timeoutMs, 10000) });
       try { await page.waitForLoadState('domcontentloaded', { timeout: 3000 }); } catch (_) {}
       const landed = await checkLanding(page, grants);

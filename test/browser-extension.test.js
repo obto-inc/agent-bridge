@@ -163,3 +163,18 @@ test('native host relays Chrome frames to the daemon socket and back', async () 
   host.kill();
   link.close();
 });
+
+test('pack script builds a store zip without key, and refuses remote code', () => {
+  const { execFileSync } = require('child_process');
+  const out = execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'pack-extension.js')], { encoding: 'utf8' });
+  assert.match(out, /Packed dist\/obto-agent-\d+\.\d+\.\d+\.zip/);
+  const m = JSON.parse(fs.readFileSync(path.join(ROOT, 'extension', 'manifest.json'), 'utf8'));
+  const zipped = JSON.parse(execFileSync('unzip', ['-p', path.join(ROOT, 'dist', 'obto-agent-' + m.version + '.zip'), 'manifest.json'], { encoding: 'utf8' }));
+  assert.strictEqual(zipped.key, undefined);
+  assert.strictEqual(zipped.version, m.version);
+  assert.ok(m.description.length <= 132);
+  for (const f of fs.readdirSync(path.join(ROOT, 'extension')).filter((x) => x.endsWith('.js'))) {
+    const src = fs.readFileSync(path.join(ROOT, 'extension', f), 'utf8');
+    assert.ok(!/\beval\s*\(|new\s+Function\s*\(/.test(src), f);
+  }
+});

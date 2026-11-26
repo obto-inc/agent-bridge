@@ -49,7 +49,13 @@ test('commit clicks are refused', () => {
   assert.strictEqual(clickRefusal('Checkout'), 'commit_action');
   assert.strictEqual(clickRefusal('Delete account'), 'commit_action');
   assert.strictEqual(clickRefusal('Next page'), null);
-  assert.strictEqual(clickRefusal('Connect'), null);
+  // B1-10: sending, posting and the like need the user's own click too.
+  for (const t of ['Send', 'Post', 'Reply', 'Reply all', 'Submit', 'Connect', 'Invite', 'Publish', 'Delete', 'Accept all']) {
+    assert.strictEqual(clickRefusal(t), 'commit_action', t);
+  }
+  for (const t of ['Save draft', 'Posts', 'Sender', 'Messages', 'Sign in', 'Search', 'Settings']) {
+    assert.strictEqual(clickRefusal(t), null, t);
+  }
 });
 
 test('redactUrl drops query and hash', () => {

@@ -78,9 +78,17 @@ const fieldRefusal = (attrs) => {
   return null;
 };
 
-// Clicks that complete a purchase, payment, transfer or account deletion need the
-// Commit tier (user approval per action), which this release does not have.
-const COMMIT_WORDS = /\b(buy( now)?|pay( now)?|purchase|place (your )?order|check ?out|complete (order|purchase)|subscribe|donate|transfer|send money|confirm (payment|order|purchase|transfer)|delete (my )?account|close (my )?account)\b/i;
+// Clicks that leave the user's account or cannot be undone: buying, paying,
+// transferring, deleting an account, and (B1-10, store policy: no sending for the
+// user without their confirmation) sending, posting, publishing, replying,
+// submitting, connecting and inviting. The agent prepares; the user presses it.
+// A later release adds an approval card per action (Commit tier).
+const COMMIT_WORDS = new RegExp('\\b(' + [
+  'buy( now)?', 'pay( now)?', 'purchase', 'place (your )?order', 'check ?out', 'complete (order|purchase)', 'subscribe',
+  'donate', 'transfer', 'send money', 'confirm (payment|order|purchase|transfer)', 'delete (my )?account', 'close (my )?account',
+  'send', 'send (now|message|email|reply|invite|invitation|request)', 'post', 'post (now|comment|reply)', 'publish', 'reply',
+  'reply all', 'submit', 'connect', 'invite', 'tweet', 'repost', 'retweet', 'share now', 'delete', 'confirm', 'accept',
+].join('|') + ')\\b', 'i');
 const clickRefusal = (text) => (COMMIT_WORDS.test(String(text || '')) ? 'commit_action' : null);
 
 const ObtoGuards = { siteOf, siteFromInput, hasGrant, redactUrl, fieldRefusal, clickRefusal, SHARED_SUFFIXES };

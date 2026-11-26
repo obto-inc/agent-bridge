@@ -1,8 +1,15 @@
 {
   "manifest_version": 3,
   "name": "OBTO agent",
-  "version": "0.1.0",
-  "description": "Lets your OBTO agent read and act in its own tab group in your Chrome, as you, on sites you allow. Linked through the OBTO bridge on this computer.",
+  "version": "1.0.0",
+  "description": "Lets your OBTO AI agent read and, with your approval, act on sites you allow, in its own tab group in your Chrome.",
+  "homepage_url": "https://www.obto.co",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjaElSmQ4TJqCggHUZoXE6JfjmXjMYRAyeOzWKyKOqfb3+vk7zZrOK+w1eGVHcQv1zzAtadjthrbM3EUXocH0d23lzmpjk/FpS/WoMbR0uezCfHFtqeOBcyytOg6Ap1Z7AC0aFGhzLtmVHycy0NTytUuKupDGtsmRo5HnqiSDB96TDL0Er9JYif0BLD13BEO/eh5TEzouD0y/EkmAibg/mPYMMkdISfO1Ol+9JaUiP6yePh5ZBplaG+nT0iIxt+rlcYOpjov5AKdnwQ9YmqLly5IB8F43usLLA1dsWJMAk0EIGgSc9aXrK5v/9B3jYwSRjb3tD9ibieKGwu7MZ8LBNQIDAQAB",
   "permissions": [
     "tabs",
@@ -19,7 +26,11 @@
   },
   "action": {
     "default_title": "OBTO agent",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
   },
   "minimum_chrome_version": "116"
 }

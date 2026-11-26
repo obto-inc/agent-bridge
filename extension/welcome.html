@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OBTO agent: before you start</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body class="page">
+<main>
+  <img src="icons/icon128.png" width="48" height="48" alt="">
+  <h1>Before the OBTO agent uses your browser</h1>
+  <p class="lead">This extension lets your OBTO AI agent open, read and, when you allow it, click and type on web pages in your Chrome, signed in as you. It works only in its own "OBTO agent" tab group and only on sites you approve.</p>
+
+  <h2>What leaves this computer</h2>
+  <ul>
+    <li>For pages in the agent's tab group: the address (without the part after "?"), the title and the visible text, the labels of buttons and fields it uses, and screenshots when the agent asks for one.</li>
+    <li>These go to your OBTO conversation, through the OBTO bridge program on this computer, and to the AI model you chose for that conversation, so it can do the task you asked for.</li>
+    <li>OBTO keeps a record of each action (site, action, time, result, address without the part after "?") for 90 days.</li>
+  </ul>
+
+  <h2>What never leaves it</h2>
+  <ul>
+    <li>Your other tabs, your browsing history, cookies and saved passwords.</li>
+    <li>What you type in password, payment, one-time-code, bank and ID fields. The agent never types into them.</li>
+  </ul>
+
+  <h2>What the agent will not do</h2>
+  <ul>
+    <li>Use a site you have not approved. You approve each site in OBTO.</li>
+    <li>Send, post, reply, submit, buy, pay, accept or delete. It prepares the draft; you press the button.</li>
+  </ul>
+
+  <h2>You stay in control</h2>
+  <ul>
+    <li>Press Stop in the extension (or in OBTO) to end the agent's use of your browser at once.</li>
+    <li>Turn the extension off in its menu at any time, or remove it from Chrome.</li>
+  </ul>
+
+  <p>OBTO does not sell this data, use it for ads, or use it to train AI models. Read the <a href="https://www.obto.co/privacy" target="_blank" rel="noopener">privacy policy</a>.</p>
+
+  <div class="row">
+    <button id="agree" class="primary">I agree, turn it on</button>
+    <button id="later">Not now</button>
+  </div>
+  <p id="msg" class="msg" role="status"></p>
+</main>
+<script src="welcome.js"></script>
+</body></html>
