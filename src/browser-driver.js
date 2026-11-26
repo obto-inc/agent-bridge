@@ -21,7 +21,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { siteOf, hasGrant, redactUrl, fieldRefusal, clickRefusal } = require('./browser-guards');
+const { siteOf, siteFromInput, hasGrant, redactUrl, fieldRefusal, clickRefusal } = require('./browser-guards');
 
 const TEXT_MAX = 30000;
 const REFS_MAX = 200;
@@ -31,6 +31,7 @@ const SHOT_MAX_CHARS = 150000;
 const NEED = {
   open: 'read', read: 'read', find: 'read', scroll: 'read', back: 'read', screenshot: 'read', tabs: null, close: null,
   click: 'act', type: 'act',
+  grant: null, // B1-5: a site grant the user approved on a DevZone card
 };
 const DRIVER_ACTIONS = Object.keys(NEED);
 
@@ -139,6 +140,9 @@ const createBrowserDriver = (opts) => {
   const launcher = o.launcher || defaultLauncher;
   const log = o.log || (() => {});
   const now = o.now || (() => Date.now());
+  // B1-5: persists an `always` grant (config.json). Tests pass a fake.
+  const saveGrant = o.saveGrant || null;
+  const runGrants = new Map(); // runId -> { site: level }
 
   let ctx = null;
   let launching = null;
@@ -364,6 +368,29 @@ const createBrowserDriver = (opts) => {
     return fail('not_implemented');
   };
 
+  // B1-5: the user approved a site on a DevZone card. scope run = this run only
+  // (memory); always = saved to config.json. Refused when the machine owner turned
+  // remote grants off (obto-bridge browser remote-grants off).
+  const applyGrant = (runId, args, cfg) => {
+    if (cfg && cfg.browserRemoteGrants === false) {
+      return fail('remote_grants_off', 'This machine accepts site grants only from its own CLI (obto-bridge browser allow).');
+    }
+    const site = siteFromInput(args.site);
+    if (!site) return fail('site_invalid');
+    const level = args.level === 'act' ? 'act' : 'read';
+    if (args.scope === 'always') {
+      if (!saveGrant) return fail('grant_not_saved');
+      saveGrant(site, level);
+    } else {
+      const g = runGrants.get(runId) || {};
+      g[site] = level;
+      runGrants.set(runId, g);
+      while (runGrants.size > 50) runGrants.delete(runGrants.keys().next().value);
+    }
+    log('info', 'browser grant', { site, level, scope: args.scope === 'always' ? 'always' : 'run', runId });
+    return { ok: true, result: { site, level, scope: args.scope === 'always' ? 'always' : 'run' } };
+  };
+
   // cmd: { cmdId, runId?, action, args, expiresAt }. cfg: daemon config (browserGrants).
   const run = (cmd, cfg) => {
     const job = queue.then(async () => {
@@ -371,10 +398,15 @@ const createBrowserDriver = (opts) => {
       const runId = String(cmd.runId || 'manual').slice(0, 80);
       const action = String(cmd.action || '');
       const args = cmd.args && typeof cmd.args === 'object' ? cmd.args : {};
-      const grants = (cfg && cfg.browserGrants) || {};
+      // Machine grants plus this run's own grants; the higher level wins.
+      const grants = Object.assign({}, (cfg && cfg.browserGrants) || {});
+      const rg = runGrants.get(runId) || {};
+      Object.keys(rg).forEach((s) => { if (grants[s] !== 'act') grants[s] = rg[s]; });
       let out;
       if (stoppedRuns.has(runId)) {
         out = fail('stopped_by_user', 'You pressed Stop for this run. Start a new run to use the browser again.');
+      } else if (action === 'grant') {
+        out = applyGrant(runId, args, cfg);
       } else if (!Object.prototype.hasOwnProperty.call(NEED, action)) {
         out = fail('not_implemented');
       } else {

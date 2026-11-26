@@ -42,11 +42,28 @@ const printGrants = () => {
 
 if (sub === 'status') {
   console.log('Browser control on this machine: ' + (file.browser === true ? 'ON' : 'off'));
+  console.log('DevZone site grants: ' + (file.browserRemoteGrants === false ? 'off' : 'on'));
   printGrants();
   process.exit(0);
 }
 
 if (sub === 'grants') { printGrants(); process.exit(0); }
+
+// DZ-B1 B1-5: site grants the user approves on a DevZone card. On by default.
+if (sub === 'remote-grants') {
+  const v = (process.argv[4] || '').toLowerCase();
+  if (v !== 'on' && v !== 'off') {
+    console.log('DevZone site grants on this machine: ' + (file.browserRemoteGrants === false ? 'off' : 'on'));
+    console.log('Change: obto-bridge browser remote-grants on | off');
+    process.exit(0);
+  }
+  file.browserRemoteGrants = v === 'on';
+  save();
+  console.log(v === 'on'
+    ? 'DevZone approval cards can add site grants on this machine.'
+    : 'Site grants now come only from this CLI (obto-bridge browser allow).');
+  process.exit(0);
+}
 
 if (sub === 'allow' || sub === 'deny') {
   const site = siteFromInput(process.argv[4]);
@@ -72,7 +89,7 @@ if (sub === 'allow' || sub === 'deny') {
 }
 
 if (sub !== 'enable' && sub !== 'disable') {
-  console.error('Usage: obto-bridge browser enable | disable | status | allow <site> [read|act] | deny <site> | grants');
+  console.error('Usage: obto-bridge browser enable | disable | status | allow <site> [read|act] | deny <site> | grants | remote-grants on|off');
   process.exit(2);
 }
 

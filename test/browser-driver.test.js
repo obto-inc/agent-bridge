@@ -268,3 +268,44 @@ test('commands run one at a time', async () => {
   assert.strictEqual(a.ok, true);
   assert.strictEqual(b.ok, true, 'read waits for open');
 });
+
+// ---- B1-5 grants from a DevZone card --------------------------------------
+
+test('a run grant lets that run open the site, and only that run', async () => {
+  const fb = fakeBrowser(SITE);
+  const driver = createBrowserDriver({ launcher: fb.launcher, auditPath: null });
+  const cfg = { browserGrants: {} };
+  const go = (runId, action, args) => driver.run({ cmdId: 'bc_g' + Math.random(), runId, action, args, expiresAt: new Date(Date.now() + 20000).toISOString() }, cfg);
+  assert.strictEqual((await go('r1', 'open', { url: 'https://example.com/' })).error, 'site_not_granted');
+  const g = await go('r1', 'grant', { site: 'www.example.com', level: 'read', scope: 'run' });
+  assert.deepStrictEqual(g.result, { site: 'example.com', level: 'read', scope: 'run' });
+  assert.strictEqual((await go('r1', 'open', { url: 'https://example.com/' })).ok, true);
+  assert.strictEqual((await go('r1', 'type', { target: 'Search', text: 'x' })).error, 'site_not_granted', 'read grant, no typing');
+  assert.strictEqual((await go('r2', 'read', {})).error, 'site_not_granted', 'another run has no grant');
+});
+
+test('an always grant is saved through saveGrant', async () => {
+  const saved = [];
+  const fb = fakeBrowser(SITE);
+  const driver = createBrowserDriver({ launcher: fb.launcher, auditPath: null, saveGrant: (s, l) => saved.push([s, l]) });
+  const r = await driver.run({ cmdId: 'bc_g1', runId: 'r1', action: 'grant', args: { site: 'https://example.com/x', level: 'act', scope: 'always' } }, {});
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(saved, [['example.com', 'act']]);
+});
+
+test('remote grants turned off on the machine are refused', async () => {
+  const fb = fakeBrowser(SITE);
+  const driver = createBrowserDriver({ launcher: fb.launcher, auditPath: null, saveGrant: () => { throw new Error('must not save'); } });
+  const r = await driver.run({ cmdId: 'bc_g2', runId: 'r1', action: 'grant', args: { site: 'example.com', level: 'act', scope: 'always' } }, { browserRemoteGrants: false });
+  assert.strictEqual(r.error, 'remote_grants_off');
+});
+
+test('a stopped run cannot be granted a site', async () => {
+  const fb = fakeBrowser(SITE);
+  const driver = createBrowserDriver({ launcher: fb.launcher, auditPath: null });
+  const cfg = { browserGrants: { 'example.com': 'read' } };
+  await driver.run({ cmdId: 'bc_s1', runId: 'r9', action: 'open', args: { url: 'https://example.com/' } }, cfg);
+  await fb.ctx._stop();
+  const r = await driver.run({ cmdId: 'bc_s2', runId: 'r9', action: 'grant', args: { site: 'other.org', level: 'read', scope: 'run' } }, cfg);
+  assert.strictEqual(r.error, 'stopped_by_user');
+});

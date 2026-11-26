@@ -60,6 +60,8 @@ const loadConfig = () => {
     browser: (process.env.BRIDGE_BROWSER === '1') || file.browser === true,
     // DZ-B1 B1-4 — per-site grants: { "<site>": "read" | "act" } (obto-bridge browser allow).
     browserGrants: file.browserGrants && typeof file.browserGrants === 'object' ? file.browserGrants : {},
+    // DZ-B1 B1-5 — site grants approved on a DevZone card are accepted unless turned off here.
+    browserRemoteGrants: file.browserRemoteGrants !== false,
     discovery: (() => {
       const v = String(process.env.BRIDGE_DISCOVERY || file.discovery || 'metadata').trim().toLowerCase();
       return v === 'full' ? 'full' : 'metadata';
@@ -93,4 +95,17 @@ const authHeaders = (cfg) => Object.assign(
   agentIdHeader(cfg.agentId),
 );
 
-module.exports = { loadConfig, authHeaders, agentIdHeader, CONFIG_DIR, CONFIG_PATH };
+// DZ-B1 B1-5 — persist one `always` site grant (approved on a DevZone card).
+// Re-reads the file so a concurrent CLI edit is not lost; mode 0600.
+const saveBrowserGrant = (site, level) => {
+  let file = {};
+  try { file = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch (_) { return false; }
+  const g = file.browserGrants && typeof file.browserGrants === 'object' ? file.browserGrants : {};
+  if (g[site] === 'act' && level === 'read') return true; // never downgrade
+  g[site] = level;
+  file.browserGrants = g;
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(file, null, 2) + '\n', { mode: 0o600 });
+  return true;
+};
+
+module.exports = { loadConfig, authHeaders, agentIdHeader, saveBrowserGrant, CONFIG_DIR, CONFIG_PATH };

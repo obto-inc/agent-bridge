@@ -19,6 +19,7 @@ const { drive, tryResolvePermission, agentFor } = require('./driver');
 const { postAgentActivity, claimThread, postExternalSync, postBrowserResult } = require('./bridge-http');
 const { createBrowserChannel } = require('./browser-channel');
 const { createBrowserDriver } = require('./browser-driver');
+const { saveBrowserGrant } = require('./config');
 const { detect: detectCapabilities } = require('./capabilities');
 // Phase 6.1/6.5 — external discovery: Claude/Codex JSONL + the opencode
 // SQLite DB. beta.31: both scanners run in a worker thread (scan-host.js) so
@@ -153,7 +154,12 @@ const browserChannel = createBrowserChannel({
   log: (level, msg, data) => log(level, msg, data),
   version: DAEMON_VERSION,
   getDriver: () => {
-    if (!browserDriver) browserDriver = createBrowserDriver({ log: (level, msg, data) => log(level, msg, data) });
+    if (!browserDriver) {
+      browserDriver = createBrowserDriver({
+        log: (level, msg, data) => log(level, msg, data),
+        saveGrant: (site, level) => saveBrowserGrant(site, level),
+      });
+    }
     return browserDriver;
   },
 });
