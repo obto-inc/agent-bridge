@@ -22,6 +22,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { siteOf, siteFromInput, hasGrant, redactUrl, fieldRefusal, clickRefusal } = require('./browser-guards');
+const { collectPage, elementInfo } = require('./browser-page');
 
 const TEXT_MAX = 30000;
 const REFS_MAX = 200;
@@ -73,63 +74,6 @@ const OVERLAY_SCRIPT = `(() => {
   else mount();
 })();`;
 
-// In-page: page text plus numbered refs for links, buttons and inputs. Input
-// values are never read (only the value of submit/button inputs, as a name).
-function collectPage(max) {
-  const sel = 'a[href],button,input:not([type=hidden]),textarea,select,[role=button],[role=link],[role=checkbox],' +
-    '[role=tab],[role=menuitem],[role=option],[contenteditable="true"]';
-  document.querySelectorAll('[data-obto-ref]').forEach((e) => e.removeAttribute('data-obto-ref'));
-  const refs = [];
-  let n = 0;
-  for (const el of document.querySelectorAll(sel)) {
-    if (refs.length >= max.refs) break;
-    if (el.closest('[data-obto-overlay]')) continue;
-    const r = el.getBoundingClientRect();
-    const st = getComputedStyle(el);
-    if ((r.width === 0 && r.height === 0) || st.visibility === 'hidden' || st.display === 'none') continue;
-    n += 1;
-    el.setAttribute('data-obto-ref', String(n));
-    const tag = el.tagName.toLowerCase();
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    let role = el.getAttribute('role');
-    if (!role) {
-      if (tag === 'a') role = 'link';
-      else if (tag === 'button' || type === 'submit' || type === 'button') role = 'button';
-      else if (tag === 'select') role = 'select';
-      else if (type === 'checkbox' || type === 'radio') role = type;
-      else role = 'textbox';
-    }
-    const label = el.labels && el.labels[0] ? el.labels[0].innerText : '';
-    const btnValue = tag === 'input' && (type === 'submit' || type === 'button') ? el.value : '';
-    const name = (el.getAttribute('aria-label') || label || el.getAttribute('placeholder') || el.innerText ||
-      btnValue || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-    const item = { ref: n, role, name };
-    if (tag === 'a') item.href = el.href.split('#')[0].split('?')[0];
-    if (type === 'password') item.sensitive = true;
-    refs.push(item);
-  }
-  const text = (document.body ? document.body.innerText : '').slice(0, max.text);
-  return { text, refs };
-}
-
-// In-page: what the guards need to judge one element.
-function elementInfo(el) {
-  const tag = el.tagName.toLowerCase();
-  const type = (el.getAttribute('type') || '').toLowerCase();
-  const label = el.labels && el.labels[0] ? el.labels[0].innerText : '';
-  const btnValue = tag === 'input' && (type === 'submit' || type === 'button') ? el.value : '';
-  return {
-    tag, type,
-    autocomplete: el.getAttribute('autocomplete') || '',
-    name: el.getAttribute('name') || '',
-    id: el.id || '',
-    label,
-    placeholder: el.getAttribute('placeholder') || '',
-    ariaLabel: el.getAttribute('aria-label') || '',
-    text: ((el.innerText || '') + ' ' + btnValue + ' ' + (el.getAttribute('aria-label') || '')).trim().slice(0, 200),
-  };
-}
-
 const fail = (error, message, extra) => Object.assign({ ok: false, error, message: message || null }, extra || {});
 
 const createBrowserDriver = (opts) => {
@@ -142,6 +86,10 @@ const createBrowserDriver = (opts) => {
   const now = o.now || (() => Date.now());
   // B1-5: persists an `always` grant (config.json). Tests pass a fake.
   const saveGrant = o.saveGrant || null;
+  // B1-6: the OBTO Chrome extension in the user's everyday Chrome (browser-ext-link.js).
+  // When it is connected, page actions run there, in the "OBTO agent" tab group,
+  // with the user's own logins. Grants, Stop and the audit stay here.
+  const ext = o.ext || null;
   const runGrants = new Map(); // runId -> { site: level }
 
   let ctx = null;
@@ -391,6 +339,11 @@ const createBrowserDriver = (opts) => {
     return { ok: true, result: { site, level, scope: args.scope === 'always' ? 'always' : 'run' } };
   };
 
+  // browserTarget: "profile" = always the OBTO profile window; otherwise (default
+  // "auto") the extension when it is connected.
+  const useExtension = (cfg) => !!(ext && ext.connected() && !(cfg && cfg.browserTarget === 'profile'));
+  if (ext && typeof ext.onStop === 'function') ext.onStop(() => { stop('extension'); });
+
   // cmd: { cmdId, runId?, action, args, expiresAt }. cfg: daemon config (browserGrants).
   const run = (cmd, cfg) => {
     const job = queue.then(async () => {
@@ -415,7 +368,13 @@ const createBrowserDriver = (opts) => {
         const timeoutMs = Math.max(1000, Math.min(left, 30000));
         activeRun = runId;
         try {
-          out = await doAction(Object.assign({}, cmd, { action }), grants, timeoutMs);
+          if (useExtension(cfg)) {
+            const r = await ext.request({ action, args, grants, runId, timeoutMs }, timeoutMs + 3000);
+            out = r && typeof r === 'object' ? r : fail('extension_no_answer');
+            if (out.ok) out.result = Object.assign({ where: 'my_browser' }, out.result || {});
+          } else {
+            out = await doAction(Object.assign({}, cmd, { action }), grants, timeoutMs);
+          }
         } catch (e) {
           const msg = e && e.message ? String(e.message) : String(e);
           // Stop marks the run before it closes the window, so the error a

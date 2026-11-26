@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "OBTO agent",
+  "version": "0.1.0",
+  "description": "Lets your OBTO agent read and act in its own tab group in your Chrome, as you, on sites you allow. Linked through the OBTO bridge on this computer.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjaElSmQ4TJqCggHUZoXE6JfjmXjMYRAyeOzWKyKOqfb3+vk7zZrOK+w1eGVHcQv1zzAtadjthrbM3EUXocH0d23lzmpjk/FpS/WoMbR0uezCfHFtqeOBcyytOg6Ap1Z7AC0aFGhzLtmVHycy0NTytUuKupDGtsmRo5HnqiSDB96TDL0Er9JYif0BLD13BEO/eh5TEzouD0y/EkmAibg/mPYMMkdISfO1Ol+9JaUiP6yePh5ZBplaG+nT0iIxt+rlcYOpjov5AKdnwQ9YmqLly5IB8F43usLLA1dsWJMAk0EIGgSc9aXrK5v/9B3jYwSRjb3tD9ibieKGwu7MZ8LBNQIDAQAB",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "scripting",
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "action": {
+    "default_title": "OBTO agent",
+    "default_popup": "popup.html"
+  },
+  "minimum_chrome_version": "116"
+}

@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>OBTO agent</title>
+<style>
+body{font:13px/1.4 -apple-system,"Segoe UI",sans-serif;margin:0;padding:14px;width:260px;color:#111827;background:#fff}
+h1{font-size:14px;margin:0 0 8px}
+p{margin:0 0 10px;color:#4b5563}
+.row{display:flex;gap:8px}
+button{flex:1;font:600 12px -apple-system,sans-serif;border:0;border-radius:8px;padding:8px;cursor:pointer;background:#ede9fe;color:#4c1d95}
+button.stop{background:#ef4444;color:#fff}
+#msg{min-height:16px;margin-top:8px;color:#4b5563}
+</style></head>
+<body>
+<h1>OBTO agent</h1>
+<p id="status">Checking…</p>
+<div class="row"><button id="share">Share this tab</button><button id="stop" class="stop">Stop</button></div>
+<div id="msg"></div>
+<script src="popup.js"></script>
+</body></html>

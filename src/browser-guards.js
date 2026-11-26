@@ -83,4 +83,8 @@ const fieldRefusal = (attrs) => {
 const COMMIT_WORDS = /\b(buy( now)?|pay( now)?|purchase|place (your )?order|check ?out|complete (order|purchase)|subscribe|donate|transfer|send money|confirm (payment|order|purchase|transfer)|delete (my )?account|close (my )?account)\b/i;
 const clickRefusal = (text) => (COMMIT_WORDS.test(String(text || '')) ? 'commit_action' : null);
 
-module.exports = { siteOf, siteFromInput, hasGrant, redactUrl, fieldRefusal, clickRefusal, SHARED_SUFFIXES };
+const ObtoGuards = { siteOf, siteFromInput, hasGrant, redactUrl, fieldRefusal, clickRefusal, SHARED_SUFFIXES };
+// B1-6: the same file runs in the OBTO Chrome extension (importScripts), where
+// there is no `module`. extension/lib/ holds a byte-identical copy.
+if (typeof module !== 'undefined' && module.exports) module.exports = ObtoGuards;
+else self.ObtoGuards = ObtoGuards;

@@ -19,6 +19,7 @@ const { drive, tryResolvePermission, agentFor } = require('./driver');
 const { postAgentActivity, claimThread, postExternalSync, postBrowserResult } = require('./bridge-http');
 const { createBrowserChannel } = require('./browser-channel');
 const { createBrowserDriver } = require('./browser-driver');
+const { createExtLink } = require('./browser-ext-link');
 const { saveBrowserGrant } = require('./config');
 const { detect: detectCapabilities } = require('./capabilities');
 // Phase 6.1/6.5 — external discovery: Claude/Codex JSONL + the opencode
@@ -148,6 +149,13 @@ let stream = null;
 // DZ-B1 B1-3/B1-4 — browser command channel and driver. The driver (and Chrome)
 // starts on the first browser action, never at daemon start.
 let browserDriver = null;
+// B1-6: link to the OBTO Chrome extension (everyday Chrome), only when browser
+// control is on. Unix socket in ~/.obto-bridge, no TCP port.
+let extLink = null;
+if (loadConfig().browser === true) {
+  extLink = createExtLink({ log: (level, msg, data) => log(level, msg, data) });
+  extLink.start().then((ok) => log('info', 'extension link ' + (ok ? 'listening' : 'failed'), { socket: extLink.socketPath }));
+}
 const browserChannel = createBrowserChannel({
   getConfig: loadConfig,
   postResult: postBrowserResult,
@@ -158,6 +166,7 @@ const browserChannel = createBrowserChannel({
       browserDriver = createBrowserDriver({
         log: (level, msg, data) => log(level, msg, data),
         saveGrant: (site, level) => saveBrowserGrant(site, level),
+        ext: extLink,
       });
     }
     return browserDriver;
@@ -583,6 +592,7 @@ const shutdown = (signal) => {
   if (externalScanTimer) { try { clearInterval(externalScanTimer); } catch (_) {} }
   stopScanWorker();
   if (browserDriver && browserDriver.isOpen()) { browserDriver.stop('daemon_shutdown').catch(() => {}); }
+  if (extLink) { try { extLink.close(); } catch (_) {} }
   setTimeout(() => process.exit(0), 200);
 };
 

@@ -42,12 +42,31 @@ const printGrants = () => {
 
 if (sub === 'status') {
   console.log('Browser control on this machine: ' + (file.browser === true ? 'ON' : 'off'));
+  console.log('Agent browser: ' + (file.browserTarget === 'profile' ? 'profile (OBTO window)' : 'auto (your Chrome via the extension when linked)'));
   console.log('DevZone site grants: ' + (file.browserRemoteGrants === false ? 'off' : 'on'));
   printGrants();
   process.exit(0);
 }
 
 if (sub === 'grants') { printGrants(); process.exit(0); }
+
+// DZ-B1 B1-6: the OBTO extension in your everyday Chrome.
+if (sub === 'extension') { require('./browser-extension'); return; }
+
+// Which browser the agent drives: auto (the extension when it is linked, else the
+// OBTO profile window) or profile (always the OBTO profile window).
+if (sub === 'use') {
+  const v = (process.argv[4] || '').toLowerCase();
+  if (v !== 'auto' && v !== 'profile') {
+    console.log('Agent browser: ' + (file.browserTarget === 'profile' ? 'profile (OBTO window)' : 'auto (your Chrome via the extension when linked)'));
+    console.log('Change: obto-bridge browser use auto | profile');
+    process.exit(0);
+  }
+  file.browserTarget = v;
+  save();
+  console.log(v === 'profile' ? 'The agent uses the separate OBTO Chrome window.' : 'The agent uses your Chrome (OBTO agent tab group) when the extension is linked.');
+  process.exit(0);
+}
 
 // DZ-B1 B1-5: site grants the user approves on a DevZone card. On by default.
 if (sub === 'remote-grants') {
@@ -89,7 +108,7 @@ if (sub === 'allow' || sub === 'deny') {
 }
 
 if (sub !== 'enable' && sub !== 'disable') {
-  console.error('Usage: obto-bridge browser enable | disable | status | allow <site> [read|act] | deny <site> | grants | remote-grants on|off');
+  console.error('Usage: obto-bridge browser enable | disable | status | allow <site> [read|act] | deny <site> | grants | remote-grants on|off | use auto|profile | extension install|status|path');
   process.exit(2);
 }
 
