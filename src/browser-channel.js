@@ -58,9 +58,13 @@ const createBrowserChannel = ({ getConfig, postResult, log, version, getDriver }
         { cmdId, agentId: cfg.agentId, ok, tookMs: Date.now() - startedAt, daemonVersion: version },
         fields,
       );
+      const postAt = Date.now();
       try {
         const r = await postResult(body);
-        if (!r || !r.ok) log('warn', 'browser result post failed', { cmdId, status: r && r.status });
+        const postMs = Date.now() - postAt;
+        const bytes = JSON.stringify(body).length;
+        if (!r || !r.ok) log('warn', 'browser result post failed', { cmdId, status: r && r.status, postMs, bytes });
+        else log(postMs > 3000 ? 'warn' : 'event', 'browser result posted', { cmdId, postMs, bytes, actionMs: body.tookMs });
       } catch (e) {
         log('warn', 'browser result post threw', { cmdId, error: e && e.message });
       }
