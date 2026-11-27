@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OBTO agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lets your OBTO AI agent read and, with your approval, act on sites you allow, in its own tab group in your Chrome.",
   "homepage_url": "https://www.obto.co",
   "icons": {
