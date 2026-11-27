@@ -40,12 +40,25 @@ const siteFromInput = (input) => {
   return siteOf(/^[a-z]+:\/\//i.test(s) ? s : 'https://' + s);
 };
 
+// One owner, several registrable domains: a web app that moves between them while
+// signing in or loading (outlook.office.com redirects to outlook.cloud.microsoft and
+// signs in on login.microsoftonline.com). A grant for any member covers the family.
+// Only add families owned by a single company.
+const SITE_FAMILIES = [
+  ['office.com', 'office365.com', 'office.net', 'cloud.microsoft', 'microsoft.com', 'microsoftonline.com',
+    'live.com', 'outlook.com', 'msauth.net', 'msftauth.net', 'live.net'],
+  ['google.com', 'googleusercontent.com', 'gstatic.com', 'youtube.com'],
+];
+const FAMILY_OF = new Map();
+SITE_FAMILIES.forEach((fam, i) => fam.forEach((s) => FAMILY_OF.set(s, i)));
+const familySites = (site) => (FAMILY_OF.has(site) ? SITE_FAMILIES[FAMILY_OF.get(site)] : [site]);
+
+const levelOk = (g, need) => (need === 'read' ? g === 'read' || g === 'act' : g === 'act');
+
 // grants: { "<site>": "read" | "act" }. need: "read" | "act".
 const hasGrant = (grants, site, need) => {
   if (!site || !grants || typeof grants !== 'object') return false;
-  const g = grants[site];
-  if (need === 'read') return g === 'read' || g === 'act';
-  return g === 'act';
+  return familySites(site).some((s) => levelOk(grants[s], need));
 };
 
 // A URL safe to put in the audit log or a result: origin + path, no query or hash.
@@ -91,7 +104,7 @@ const COMMIT_WORDS = new RegExp('\\b(' + [
 ].join('|') + ')\\b', 'i');
 const clickRefusal = (text) => (COMMIT_WORDS.test(String(text || '')) ? 'commit_action' : null);
 
-const ObtoGuards = { siteOf, siteFromInput, hasGrant, redactUrl, fieldRefusal, clickRefusal, SHARED_SUFFIXES };
+const ObtoGuards = { siteOf, siteFromInput, hasGrant, familySites, redactUrl, fieldRefusal, clickRefusal, SHARED_SUFFIXES, SITE_FAMILIES };
 // B1-6: the same file runs in the OBTO Chrome extension (importScripts), where
 // there is no `module`. extension/lib/ holds a byte-identical copy.
 if (typeof module !== 'undefined' && module.exports) module.exports = ObtoGuards;

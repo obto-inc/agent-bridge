@@ -21,7 +21,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { siteOf, siteFromInput, hasGrant, redactUrl, fieldRefusal, clickRefusal } = require('./browser-guards');
+const { siteOf, siteFromInput, hasGrant, familySites, redactUrl, fieldRefusal, clickRefusal } = require('./browser-guards');
 const { collectPage, elementInfo } = require('./browser-page');
 
 const TEXT_MAX = 30000;
@@ -355,6 +355,11 @@ const createBrowserDriver = (opts) => {
       const grants = Object.assign({}, (cfg && cfg.browserGrants) || {});
       const rg = runGrants.get(runId) || {};
       Object.keys(rg).forEach((s) => { if (grants[s] !== 'act') grants[s] = rg[s]; });
+      // Spell out each grant's site family, so an extension running an older copy of
+      // browser-guards (no families) still accepts a redirect inside the family.
+      Object.keys(grants).forEach((s) => familySites(s).forEach((f) => {
+        if (grants[f] !== 'act') grants[f] = grants[s] === 'act' ? 'act' : 'read';
+      }));
       let out;
       if (stoppedRuns.has(runId)) {
         out = fail('stopped_by_user', 'You pressed Stop for this run. Start a new run to use the browser again.');

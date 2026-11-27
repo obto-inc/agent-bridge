@@ -31,6 +31,16 @@ test('read grant does not allow act; act allows read', () => {
   assert.ok(!hasGrant(g, 'c.com', 'read'));
 });
 
+test('a grant covers its site family (Outlook moves office.com -> cloud.microsoft)', () => {
+  const g = { 'office.com': 'read' };
+  assert.strictEqual(siteOf('https://outlook.cloud.microsoft/mail/'), 'cloud.microsoft');
+  assert.ok(hasGrant(g, 'cloud.microsoft', 'read'));
+  assert.ok(hasGrant(g, 'microsoftonline.com', 'read'));
+  assert.ok(!hasGrant(g, 'cloud.microsoft', 'act'));
+  assert.ok(!hasGrant(g, 'google.com', 'read'));
+  assert.ok(!hasGrant({ 'github.com': 'act' }, 'microsoft.com', 'read'));
+});
+
 test('sensitive fields are refused', () => {
   assert.strictEqual(fieldRefusal({ type: 'password' }), 'password_field');
   assert.strictEqual(fieldRefusal({ autocomplete: 'cc-number' }), 'sensitive_field');
