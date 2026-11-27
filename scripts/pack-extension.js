@@ -29,7 +29,7 @@ const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).forEach((d) =
   const p = path.join(dir, d.name);
   if (d.isDirectory()) return walk(p);
   const rel = path.relative(EXT, p);
-  if (rel === 'EXTENSION_ID' || d.name.startsWith('.')) return;
+  if (rel === 'EXTENSION_ID' || rel === 'STORE_ID' || d.name.startsWith('.')) return;
   files.push(rel);
 });
 walk(EXT);

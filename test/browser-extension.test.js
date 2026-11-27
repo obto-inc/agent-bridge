@@ -56,6 +56,9 @@ test('extension manifest: pinned id, no cookie / history / debugger permissions'
   const h = crypto.createHash('sha256').update(Buffer.from(m.key, 'base64')).digest('hex').slice(0, 32);
   const id = [...h].map((x) => String.fromCharCode(97 + parseInt(x, 16))).join('');
   assert.strictEqual(id, fs.readFileSync(path.join(ROOT, 'extension', 'EXTENSION_ID'), 'utf8').trim());
+  // The store item id is a valid extension id and the host manifest allows it.
+  assert.match(fs.readFileSync(path.join(ROOT, 'extension', 'STORE_ID'), 'utf8').trim(), /^[a-p]{32}$/);
+  assert.match(fs.readFileSync(path.join(ROOT, 'cli', 'browser-extension.js'), 'utf8'), /STORE_ID \+ '\/'/);
 });
 
 test('ext link: not connected until hello; request round trip; stop event', async () => {

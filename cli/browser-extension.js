@@ -16,6 +16,8 @@ const HOST = 'co.obto.bridge';
 const ROOT = path.join(__dirname, '..');
 const EXT_DIR = path.join(ROOT, 'extension');
 const EXT_ID = fs.readFileSync(path.join(EXT_DIR, 'EXTENSION_ID'), 'utf8').trim();
+// The Chrome Web Store item id (assigned on the first draft upload, 2026-11-27).
+const STORE_ID = fs.readFileSync(path.join(EXT_DIR, 'STORE_ID'), 'utf8').trim();
 const BASE = path.join(os.homedir(), '.obto-bridge');
 const LAUNCHER = path.join(BASE, 'native-host.sh');
 
@@ -49,7 +51,7 @@ const manifestFor = () => ({
   description: 'OBTO bridge: links the OBTO agent extension to the bridge daemon on this computer',
   path: LAUNCHER,
   type: 'stdio',
-  allowed_origins: ['chrome-extension://' + EXT_ID + '/'],
+  allowed_origins: ['chrome-extension://' + STORE_ID + '/', 'chrome-extension://' + EXT_ID + '/'],
 });
 
 const sub = process.argv[4] || 'status';
