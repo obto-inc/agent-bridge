@@ -1,0 +1,5 @@
+No password needed. macOS or Linux, Node 18+.
+1. Sign in with Google at https://app.obto.co (free workspace).
+2. Terminal: npm i -g @obtoai/agent-bridge; obto-bridge init (approve this machine in the browser); obto-bridge browser enable; obto-bridge install-service; obto-bridge browser extension install
+3. Add this extension, click "I agree, turn it on".
+4. In OBTO DevZone ask: "Open example.com and read it". Approve the site. The page opens in the "OBTO agent" tab group.
